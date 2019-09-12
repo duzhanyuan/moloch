@@ -14,16 +14,18 @@
  */
 #include "moloch.h"
 
+extern MolochConfig_t        config;
+
 typedef struct {
     int       which;
 } Info_t;
 
-static int userField;
-static int dbField;
-static int appField;
+LOCAL  int userField;
+LOCAL  int dbField;
+LOCAL  int appField;
 
 /******************************************************************************/
-int postgresql_parser(MolochSession_t *session, void *uw, const unsigned char *data, int len, int which) 
+LOCAL int postgresql_parser(MolochSession_t *session, void *uw, const unsigned char *data, int len, int which)
 {
     Info_t *info = uw;
     if (which != info->which)
@@ -50,16 +52,16 @@ int postgresql_parser(MolochSession_t *session, void *uw, const unsigned char *d
         goto cleanup;
     }
 
-    while (*(BSB_WORK_PTR(bsb)) != 0) {
+    while (BSB_NOT_ERROR(bsb) && BSB_REMAINING(bsb) > 1 && *(BSB_WORK_PTR(bsb)) != 0) {
         char *key = (char*)BSB_WORK_PTR(bsb);
-        int klen = strlen(key);
+        int klen = strnlen(key, BSB_REMAINING(bsb));
         BSB_IMPORT_skip(bsb, klen+1);
 
         if (BSB_IS_ERROR(bsb))
             break;
 
         char *value = (char*)BSB_WORK_PTR(bsb);
-        int vlen = strlen(value);
+        int vlen = strnlen(value, BSB_REMAINING(bsb));
         BSB_IMPORT_skip(bsb, vlen+1);
 
         if (BSB_IS_ERROR(bsb))
@@ -79,14 +81,14 @@ cleanup:
     return 0;
 }
 /******************************************************************************/
-void postgresql_free(MolochSession_t UNUSED(*session), void *uw)
+LOCAL void postgresql_free(MolochSession_t UNUSED(*session), void *uw)
 {
     Info_t *info = uw;
 
     MOLOCH_TYPE_FREE(Info_t, info);
 }
 /******************************************************************************/
-void postgresql_classify(MolochSession_t *session, const unsigned char UNUSED(*data), int UNUSED(len), int which, void *UNUSED(uw))
+LOCAL void postgresql_classify(MolochSession_t *session, const unsigned char UNUSED(*data), int UNUSED(len), int which, void *UNUSED(uw))
 {
     if (moloch_session_has_protocol(session, "postgresql"))
         return;
@@ -105,22 +107,22 @@ void moloch_parser_init()
     moloch_parsers_classifier_register_tcp("postgresql", NULL, 0, (unsigned char*)"\x00\x00\x00", 3, postgresql_classify);
 
     userField = moloch_field_define("postgresql", "termfield",
-        "postgresql.user", "User", "postgresql.user-term",
+        "postgresql.user", "User", "postgresql.user",
         "Postgresql user name",
         MOLOCH_FIELD_TYPE_STR,  MOLOCH_FIELD_FLAG_LINKED_SESSIONS,
         "category", "user",
-        NULL);
+        (char *)NULL);
 
     dbField = moloch_field_define("postgresql", "termfield",
-        "postgresql.db", "Database", "postgresql.db-term",
+        "postgresql.db", "Database", "postgresql.db",
         "Postgresql database",
         MOLOCH_FIELD_TYPE_STR,  MOLOCH_FIELD_FLAG_LINKED_SESSIONS,
-        NULL);
+        (char *)NULL);
 
     appField = moloch_field_define("postgresql", "termfield",
-        "postgresql.app", "Application", "postgresql.app-term",
+        "postgresql.app", "Application", "postgresql.app",
         "Postgresql application",
         MOLOCH_FIELD_TYPE_STR,  MOLOCH_FIELD_FLAG_LINKED_SESSIONS,
-        NULL);
+        (char *)NULL);
 }
 

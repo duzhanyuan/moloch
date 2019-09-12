@@ -1,9 +1,18 @@
 #!/bin/bash
 # Simple capital C Configure script for rpm/deb, like the old days
 
+if [ "$1" == "--help" ]; then
+    echo "Configure (--wise|--parliament|)  = Only 1 option can be used"
+    echo "--wise         = install and start wise"
+    echo "--parliament   = install and start parliament"
+    echo "               = install moloch capture and viewer"
+    echo "--help         = this help"
+    exit 0
+fi
+
 if [ "$(id -u)" != "0" ]; then
-   echo "This script must be run as root"
-   exit 1
+    echo "This script must be run as root"
+    exit 1
 fi
 
 MOLOCH_NAME=BUILD_MOLOCH_NAME
@@ -16,11 +25,55 @@ if [ "$MOLOCH_INSTALL_DIR" == "BUILD_MOLOCH_""INSTALL_DIR" ]; then
 MOLOCH_INSTALL_DIR=/data/$MOLOCH_NAME
 fi
 
+if [ "$1" == "--wise" ]; then
+    if [ ! -f "$MOLOCH_INSTALL_DIR/etc/wise.ini" ]; then
+        sed -e "s,MOLOCH_ELASTICSEARCH,${MOLOCH_ELASTICSEARCH},g" -e "s,MOLOCH_INSTALL_DIR,${MOLOCH_INSTALL_DIR},g" < $MOLOCH_INSTALL_DIR/etc/wise.ini.sample > $MOLOCH_INSTALL_DIR/etc/wise.ini
+    else
+        echo "Not overwriting $MOLOCH_INSTALL_DIR/etc/wise.ini, delete and run again if update required (usually not), or edit by hand"
+        sleep 1
+    fi
+
+    if [ -d "/etc/systemd" ] && [ -x "/bin/systemctl" ]; then
+        echo "Installing systemd start files, use systemctl"
+        sed -e "s,MOLOCH_INSTALL_DIR,${MOLOCH_INSTALL_DIR},g" < $MOLOCH_INSTALL_DIR/etc/molochwise.systemd.service > /etc/systemd/system/molochwise.service
+        systemctl daemon-reload
+        systemctl enable molochwise
+        systemctl start molochwise
+    elif [ -d "/etc/init" ]; then
+        echo "Installing upstart start files, use start"
+        sed -e "s,MOLOCH_INSTALL_DIR,${MOLOCH_INSTALL_DIR},g" < $MOLOCH_INSTALL_DIR/etc/molochwise.upstart.conf > /etc/init/molochwise.conf
+        start molochwise
+    fi
+
+
+    exit 0;
+fi
+
+if [ "$1" == "--parliament" ]; then
+    if [ -d "/etc/systemd" ] && [ -x "/bin/systemctl" ]; then
+        echo "Installing systemd start files, use systemctl"
+        sed -e "s,MOLOCH_INSTALL_DIR,${MOLOCH_INSTALL_DIR},g" < $MOLOCH_INSTALL_DIR/etc/molochparliament.systemd.service > /etc/systemd/system/molochparliament.service
+        systemctl daemon-reload
+        systemctl enable molochparliament
+        systemctl start molochparliament
+    elif [ -d "/etc/init" ]; then
+        echo "Installing upstart start files, use 'start molochparliament'"
+        sed -e "s,MOLOCH_INSTALL_DIR,${MOLOCH_INSTALL_DIR},g" < $MOLOCH_INSTALL_DIR/etc/molochparliament.upstart.conf > /etc/init/molochparliament.conf
+        start molochparliament
+    fi
+
+    exit 0;
+fi
+
 ################################################################################
 ### Ask config questions
 if [ -z "$MOLOCH_INTERFACE" ]; then
     echo -n "Found interfaces: "
-    /sbin/ifconfig | grep "^[a-z]" | cut -d: -f1 | cut -d" " -f1 | paste -s -d";"
+    if [ ! -f /sbin/ifconfig ]; then
+        ip -o link | cut -f2 -d: | tr '\n' ' ' | sed 's/ \+/ /ig' | sed 's/ //1' | sed 's/[[:blank:]]*$//' | tr ' ' ';' | sed 's/$/\n/'
+    else
+        /sbin/ifconfig | grep "^[a-z]" | cut -d: -f1 | cut -d" " -f1 | paste -s -d";"
+    fi
     echo -n "Semicolon ';' seperated list of interfaces to monitor [eth1] "
     read -r MOLOCH_INTERFACE
 fi
@@ -79,34 +132,29 @@ else
 fi
 
 ################################################################################
-mkdir -p $MOLOCH_INSTALL_DIR/logs $MOLOCH_INSTALL_DIR/raw
-chown nobody $MOLOCH_INSTALL_DIR/logs $MOLOCH_INSTALL_DIR/raw
-chmod 0700 $MOLOCH_INSTALL_DIR/raw
+# re-create these directories after installation so they are not part of the package manifest
+CREATEDIRS="logs raw"
+for CREATEDIR in $CREATEDIRS; do
+    if [ ! -e $MOLOCH_INSTALL_DIR/$CREATEDIR ]; then
+        mkdir -m 0700 -p $MOLOCH_INSTALL_DIR/$CREATEDIR && \
+        chown nobody $MOLOCH_INSTALL_DIR/$CREATEDIR
+    fi
+done
 
 ################################################################################
 if [ "$MOLOCH_LOCALELASTICSEARCH" == "yes" ]; then
-    echo "Moloch - Downloading and installing demo Elasticsearch"
-    ES_VERSION=2.4.4
-    if [ ! -f "$MOLOCH_INSTALL_DIR/elasticsearch-${ES_VERSION}.tar.gz" ]; then
-        wget http://download.elastic.co/elasticsearch/elasticsearch/elasticsearch-${ES_VERSION}.tar.gz -O $MOLOCH_INSTALL_DIR/elasticsearch-${ES_VERSION}.tar.gz
-        (cd $MOLOCH_INSTALL_DIR ; tar xf elasticsearch-${ES_VERSION}.tar.gz)
-        (cd $MOLOCH_INSTALL_DIR/elasticsearch-${ES_VERSION}; ./bin/plugin install mobz/elasticsearch-head)
-        ln -sf $MOLOCH_INSTALL_DIR/elasticsearch-${ES_VERSION} $MOLOCH_INSTALL_DIR/elasticsearch
-        mkdir $MOLOCH_INSTALL_DIR/data $MOLOCH_INSTALL_DIR/etc/scripts $MOLOCH_INSTALL_DIR/elasticsearch/plugins
-        chown nobody $MOLOCH_INSTALL_DIR/data $MOLOCH_INSTALL_DIR/etc/scripts
-    fi
-
-    HOSTNAME=$(hostname -s)
-    if [ -d "/etc/systemd" ] && [ -x "/bin/systemctl" ]; then
-        sed -e "s/MOLOCH_HOSTNAME/${HOSTNAME}/g" -e "s,MOLOCH_INSTALL_DIR,${MOLOCH_INSTALL_DIR},g" < $MOLOCH_INSTALL_DIR/etc/elasticsearch.systemd.service > /etc/systemd/system/elasticsearch.service
-    elif [ -d "/etc/init" ]; then
-        sed -e "s/MOLOCH_HOSTNAME/${HOSTNAME}/g" -e "s,MOLOCH_INSTALL_DIR,${MOLOCH_INSTALL_DIR},g" < $MOLOCH_INSTALL_DIR/etc/elasticsearch.upstart.conf > /etc/init/elasticsearch.conf
+    echo "Moloch - Downloading and installing demo OSS version of Elasticsearch"
+    ES_VERSION=6.8.2
+    if [ -f "/etc/redhat-release" ]; then
+        if ! [ -x "$(command -v java)" ]; then
+          yum install java-openjdk-headless
+        fi
+        yum install https://artifacts.elastic.co/downloads/elasticsearch/elasticsearch-oss-${ES_VERSION}.rpm
     else
-        echo "No startup scripts created for elasticsearch"
+        wget https://artifacts.elastic.co/downloads/elasticsearch/elasticsearch-oss-${ES_VERSION}.deb
+        dpkg -i elasticsearch-oss-${ES_VERSION}.deb
+        /bin/rm -f elasticsearch-oss-${ES_VERSION}.deb
     fi
-
-    cp -f $MOLOCH_INSTALL_DIR/etc/logging.demo.yml $MOLOCH_INSTALL_DIR/etc/logging.yml
-    cp -f $MOLOCH_INSTALL_DIR/etc/elasticsearch.demo.yml $MOLOCH_INSTALL_DIR/etc/elasticsearch.yml
 fi
 
 ################################################################################
@@ -148,8 +196,20 @@ EOF
 fi
 
 ################################################################################
-echo "Moloch - Downloading GEO files"
-$MOLOCH_INSTALL_DIR/bin/moloch_update_geo.sh > /dev/null
+
+MOLOCH_INET=not-set
+until [ "$MOLOCH_INET" == "yes" ] || [ "$MOLOCH_INET" == "no" ] || [ "$MOLOCH_INET" == "" ]; do
+    echo -n "Download GEO files? (yes or no) [yes] "
+    read -r MOLOCH_INET
+done
+
+if [ "$MOLOCH_INET" != "no" ]; then
+    echo "Moloch - Downloading GEO files"
+    $MOLOCH_INSTALL_DIR/bin/moloch_update_geo.sh > /dev/null
+else
+    echo "Moloch - NOT downloading GEO files"
+fi
+
 
 ################################################################################
 echo ""

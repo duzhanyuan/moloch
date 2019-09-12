@@ -90,7 +90,7 @@ int reader_tpacketv3_stats(MolochReaderStats_t *stats)
     return 0;
 }
 /******************************************************************************/
-static void *reader_tpacketv3_thread(gpointer infov)
+LOCAL void *reader_tpacketv3_thread(gpointer infov)
 {
     long info = (long)infov;
     struct pollfd pfd;
@@ -112,23 +112,22 @@ static void *reader_tpacketv3_thread(gpointer infov)
             MOLOCH_UNLOCK(infos[info].lock);
         }
 
-        if (config.debug > 1) {
+        struct tpacket_block_desc *tbd = infos[info].rd[pos].iov_base;
+        if (config.debug > 2) {
             int i;
             int cnt = 0;
             int waiting = 0;
 
             for (i = 0; i < (int)infos[info].req.tp_block_nr; i++) {
-                struct tpacket_block_desc *tbd = infos[info].rd[i].iov_base;
-                if (tbd->hdr.bh1.block_status & TP_STATUS_USER) {
+                struct tpacket_block_desc *stbd = infos[info].rd[i].iov_base;
+                if (stbd->hdr.bh1.block_status & TP_STATUS_USER) {
                     cnt++;
-                    waiting += tbd->hdr.bh1.num_pkts;
+                    waiting += stbd->hdr.bh1.num_pkts;
                 }
             }
 
-            LOG("Stats pos:%d info:%ld cnt:%d waiting:%d", pos, info, cnt, waiting);
+            LOG("Stats pos:%d info:%ld status:%x waiting:%d total cnt:%d total waiting:%d", pos, info, tbd->hdr.bh1.block_status, tbd->hdr.bh1.num_pkts, cnt, waiting);
         }
-
-        struct tpacket_block_desc *tbd = infos[info].rd[pos].iov_base;
 
         // Wait until the block is owned by moloch
         if ((tbd->hdr.bh1.block_status & TP_STATUS_USER) == 0) {
@@ -144,7 +143,7 @@ static void *reader_tpacketv3_thread(gpointer infov)
         for (p = 0; p < tbd->hdr.bh1.num_pkts; p++) {
             if (unlikely(th->tp_snaplen != th->tp_len)) {
                 LOGEXIT("ERROR - Moloch requires full packet captures caplen: %d pktlen: %d\n"
-                    "turning offloading off may fix, something like 'ethtool -K INTERFACE tx off sg off gro off gso off lro off tso off'",
+                    "See https://molo.ch/faq#moloch_requires_full_packet_captures_error",
                     th->tp_snaplen, th->tp_len);
             }
 
@@ -153,6 +152,11 @@ static void *reader_tpacketv3_thread(gpointer infov)
             packet->pktlen        = th->tp_len;
             packet->ts.tv_sec     = th->tp_sec;
             packet->ts.tv_usec    = th->tp_nsec/1000;
+            packet->readerPos     = info;
+
+            if ((th->tp_status & TP_STATUS_VLAN_VALID) && th->hv1.tp_vlan_tci) {
+                packet->vlan = th->hv1.tp_vlan_tci & 0xfff;
+            }
 
             moloch_packet_batch(&batch, packet);
 
@@ -171,8 +175,8 @@ void reader_tpacketv3_start() {
     char name[100];
     for (i = 0; i < MAX_INTERFACES && config.interface[i]; i++) {
         for (t = 0; t < numThreads; t++) {
-            snprintf(name, sizeof(name), "moloch-pcap%d-%d", i, t);
-            g_thread_new(name, &reader_tpacketv3_thread, (gpointer)(long)i);
+            snprintf(name, sizeof(name), "moloch-af3%d-%d", i, t);
+            g_thread_unref(g_thread_new(name, &reader_tpacketv3_thread, (gpointer)(long)i));
         }
     }
 }
@@ -188,7 +192,7 @@ void reader_tpacketv3_stop()
 void reader_tpacketv3_init(char *UNUSED(name))
 {
     int i;
-    int blocksize = moloch_config_int(NULL, "tpacketv3BlockSize", 1<<21, 1<<16, 1<<31);
+    int blocksize = moloch_config_int(NULL, "tpacketv3BlockSize", 1<<21, 1<<16, 1U<<31);
     numThreads = moloch_config_int(NULL, "tpacketv3NumThreads", 2, 1, 6);
 
     if (blocksize % getpagesize() != 0) {
@@ -196,7 +200,7 @@ void reader_tpacketv3_init(char *UNUSED(name))
     }
 
     if (blocksize % config.snapLen != 0) {
-        LOGEXIT("block size %d not divisible by %d", blocksize, config.snapLen);
+        LOGEXIT("block size %d not divisible by %u", blocksize, config.snapLen);
     }
 
     moloch_packet_set_linksnap(1, config.snapLen);
@@ -209,6 +213,7 @@ void reader_tpacketv3_init(char *UNUSED(name))
         }
     }
 
+    int fanout_group_id = moloch_config_int(NULL, "tpacketv3ClusterId", 0x0000, 0x0000, 0xffff);
 
     for (i = 0; i < MAX_INTERFACES && config.interface[i]; i++) {
         MOLOCH_LOCK_INIT(infos[i].lock);
@@ -268,6 +273,13 @@ void reader_tpacketv3_init(char *UNUSED(name))
 
         if (bind(infos[i].fd, (struct sockaddr *) &ll, sizeof(ll)) < 0)
             LOGEXIT("Error binding %s: %s", config.interface[i], strerror(errno));
+        
+        if (fanout_group_id != 0) {
+            int fanout_type = PACKET_FANOUT_HASH;
+            int fanout_arg = (fanout_group_id | (fanout_type << 16));
+            if(setsockopt(infos[i].fd, SOL_PACKET, PACKET_FANOUT, &fanout_arg, sizeof(fanout_arg)) < 0)
+                LOGEXIT("Error setting packet fanout parameters: (%d,%s)", fanout_group_id, strerror(errno));
+        }
     }
 
     if (i == MAX_INTERFACES) {

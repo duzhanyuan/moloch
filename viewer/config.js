@@ -1,15 +1,15 @@
 /******************************************************************************/
-/* config.js -- Code dealing with the config file, command line arguments, 
+/* config.js -- Code dealing with the config file, command line arguments,
  *              and dropping privileges
  *
  * Copyright 2012-2016 AOL Inc. All rights reserved.
- * 
+ *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this Software except in compliance with the License.
  * You may obtain a copy of the License at
- * 
+ *
  *     http://www.apache.org/licenses/LICENSE-2.0
- * 
+ *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -30,9 +30,10 @@ var ini    = require('iniparser'),
     crypto = require('crypto');
 
 exports.debug = 0;
+exports.insecure = false;
 var internals = {
     configFile: "/data/moloch/etc/config.ini",
-    nodeName: os.hostname().split(".")[0],
+    hostName: os.hostname(),
     fields: [],
     fieldsMap: {},
     categories: {}
@@ -44,16 +45,29 @@ function processArgs() {
     if (process.argv[i] === "-c") {
       i++;
       internals.configFile = process.argv[i];
+    } else if (process.argv[i] === "--host") {
+      i++;
+      internals.hostName = process.argv[i];
     } else if (process.argv[i] === "-n") {
       i++;
       internals.nodeName = process.argv[i];
     } else if (process.argv[i] === "--debug") {
       exports.debug++;
+    } else if (process.argv[i] === "--insecure") {
+      exports.insecure = true;
     } else {
       args.push(process.argv[i]);
     }
   }
   process.argv = args;
+
+  if (!internals.nodeName) {
+    internals.nodeName = internals.hostName.split(".")[0];
+  }
+
+  if (exports.debug > 0) {
+    console.log ("Debug Level", exports.debug);
+  }
 }
 processArgs();
 
@@ -133,7 +147,7 @@ exports.sectionGet = function(section, key, defaultValue) {
   }
 
   return value;
-}
+};
 
 exports.getFull = function(node, key, defaultValue) {
   var value;
@@ -163,7 +177,7 @@ exports.getObj = function(key, defaultValue) {
   }
 
   var obj = {};
-  full.split(';').forEach(function(element) {
+  full.split(';').forEach((element) => {
     var parts = element.split("=");
     if (parts && parts.length === 2) {
       if (parts[1] === "true") {
@@ -181,7 +195,7 @@ function loadIncludes(includes) {
   if (!includes) {
     return;
   }
-  includes.split(';').forEach(function(file) {
+  includes.split(';').forEach((file) => {
     if (!fs.existsSync(file)) {
       console.log("ERROR - Couldn't open config includes file '" + file + "'");
       process.exit(1);
@@ -234,6 +248,10 @@ exports.nodeName = function() {
   return internals.nodeName;
 };
 
+exports.hostName = function() {
+  return internals.hostName;
+};
+
 exports.keys = function(section) {
   if (internals.config[section] === undefined) {return [];}
   return Object.keys(internals.config[section]);
@@ -243,9 +261,9 @@ exports.headers = function(section) {
   if (internals.config[section] === undefined) {return [];}
   var keys = Object.keys(internals.config[section]);
   if (!keys) {return [];}
-  var headers = Object.keys(internals.config[section]).map(function(key) {
+  var headers = Object.keys(internals.config[section]).map((key) => {
     var obj = {name: key};
-    internals.config[section][key].split(';').forEach(function(element) {
+    internals.config[section][key].split(';').forEach((element) => {
       var i = element.indexOf(':');
       if (i === -1) {
         return;
@@ -271,9 +289,9 @@ exports.configMap = function(section, name, d) {
   var keys = Object.keys(data);
   if (!keys) {return {};}
   var map = {};
-  keys.forEach(function(key) {
+  keys.forEach((key) => {
     var obj = {};
-    data[key].split(';').forEach(function(element) {
+    data[key].split(';').forEach((element) => {
       var i = element.indexOf(':');
       if (i === -1) {
         return;
@@ -323,9 +341,20 @@ exports.loadFields = function(data) {
   internals.fieldsMap = {};
   internals.dbFieldsMap = {};
   internals.categories =  {};
-  data.forEach(function(field) {
+  data.forEach((field) => {
     var source = field._source;
     source.exp = field._id;
+
+    // Add some transforms
+    if (!source.transform) {
+      if (source.exp === "http.uri" || source.exp === "http.uri.tokens") {
+        source.transform = "removeProtocol";
+      }
+      if (source.exp === "host" || source.exp.startsWith("host.")) {
+        source.transform = "removeProtocolAndURI";
+      }
+    }
+
     internals.fieldsMap[field._id] = source;
     internals.dbFieldsMap[source.dbField] = source;
     internals.fields.push(source);
@@ -333,7 +362,7 @@ exports.loadFields = function(data) {
       internals.categories[source.group] = [];
     }
     internals.categories[source.group].push(source);
-    (source.aliases || []).forEach(function(alias) {
+    (source.aliases || []).forEach((alias) => {
       internals.fieldsMap[alias] = source;
     });
   });

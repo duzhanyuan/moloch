@@ -70,7 +70,7 @@ void lua_http_on_body_cb (MolochSession_t *session, http_parser *UNUSED(hp), con
     }
 }
 /******************************************************************************/
-static int M_expression_to_fieldId(lua_State *L)
+LOCAL int M_expression_to_fieldId(lua_State *L)
 {
     if (lua_gettop(L) != 1 || !lua_isstring(L, 1)) {
         return luaL_error(L, "usage: <field expression>");
@@ -118,7 +118,6 @@ void moloch_plugin_init()
 {
     int thread;
     char **names = moloch_config_str_list(NULL, "luaFiles", "moloch.lua");
-    lua_State *L;
 
     molua_pluginIndex = moloch_plugins_register("lua", TRUE);
 
@@ -126,7 +125,7 @@ void moloch_plugin_init()
 
 
     for (thread = 0; thread < config.packetThreads; thread++) {
-        L = Ls[thread] = luaL_newstate();
+        lua_State *L = Ls[thread] = luaL_newstate();
         luaL_openlibs(L);
         moluaFakeSessions[thread].thread = thread;
 

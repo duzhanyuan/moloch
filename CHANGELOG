@@ -1,6 +1,488 @@
-0.19.0 2017/06/XX
-  - NOTICE: Upgrading from versions prior to 0.18.0 or prior to ES 5 require an
-            outage for for db.pl upgrade (~5 min) see the 0.18.0 notes below.
+NOTICE: Please see https://molo.ch/faq#upgrading-moloch for upgrading info
+
+ES Versions:
+  * Moloch >= 2.0.0  supports ES >= 6.7.0, 7.x is experimental
+  * Moloch >= 1.5.0  supports ES >= 5.5.0, 6.x, not 7.x or later
+  * Moloch >= 1.0.0  supports ES >= 5.5.0, 6.x (not prod tested, only for new installs), not 7.x or later
+  * Moloch >= 0.50.0 supports ES >= 5.5.0, not 6.x or later
+  * Moloch >= 0.18.1 supports ES 2.4.x, >= 5.3.1 not 6.x or later
+
+Node Versions:
+  * Moloch >= 2.0.0 requires NodeJS 10.x
+  * Moloch >= 1.6.0 requires NodeJS 8.x, 8.12 or later
+  * Moloch >= 1.0.0 requires NodeJS 8.x
+  * Moloch >= 0.20.0 requires NodeJS 6.x
+  * Moloch >= 0.18.1 requires NodeJS 4.x
+
+NOTICE: Restart wiseService before capture when upgrading
+
+2.0.1 2019/09/09
+  - release - cyberchef 9.4.0
+  - capture - label TLS 1.3 sessions correctly (issue #1137)
+  - capture - New simpleMaxQ setting to control max disk Q
+  - capture - http CONNECT method will now classify payload (issue #1153)
+  - capture - Initial dtls support
+  - viewer - cancel current ES query on new query
+  - viewer - fix connections page timezone
+  - viewer - fix not auto quoting all expressions (issue #1146)
+  - viewer - fix security warnings
+
+2.0.0 2019/08/19
+  - NOTICE: This versions requires ES 6.7.x (6.8.2+/7.3+ recommended) or later
+  - NOTICE: db.pl upgrade is required, see https://molo.ch/faq#how_do_i_upgrade_to_moloch_2
+  - release - cyberchef 8.30.0, node 10.16.2, yara 3.10.0
+  - release - include sample headers parsing and turn them on by default
+  - release - easybutton supports osx
+  - all - Fix some elasticsearch deprecation warnings
+  - all - elasticsearch 7 support
+  - db - backup command now saves meta data so restore can do a rollback (thanks codesniffer)
+  - db - improve optimize to deal with connection closed better
+  - parliament - Can configure multiple of each type of notifier
+  - viewer - Can display pcap retention in Capture Stats tab
+  - viewer - Added uploadFileSizeLimit
+  - viewer - Can interact with users in multiES if usersElasticsearch is set
+  - viewer - Can just delete SPI
+  - viewer - Added shortcuts feature
+  - viewer - add bytes as a graphing choice
+  - viewer - support ip == ipv4 and ip == ipv6 expressions
+  - viewer - pivot dropdown option in spiview (issue #1135)
+  - viewer - optional milisecond display
+  - viewer - Support view parameter for unique/multiunique
+  - viewer - Support ES client auth and insecure better (thanks Scott)
+  - viewer - Lots of stats summing, avg, sorting fixes
+  - capture - Initial ipv6 gtp support
+  - capture - no longer send packet lengths to ES by default (enablePacketLen)
+  - capture - add truncated-pcap tag to sessions where all pcap isn't written
+  - capture - fixed ja3s mishandling of 10/11 extension types (thanks Norwegian Healthcare CERT)
+  - capture - fixed ja3 mishandling of 11 extension types (thanks Norwegian Healthcare CERT)
+  - capture - Added startsWith,contains,endsWith rule expression modifier
+  - capture - honor the caTrustFile directive (thanks Matt)
+  - capture - fix data bytes calulations for icmp/udp (thanks Brian)
+  - capture - initial vxlan support
+  - capture - Myricom/AFPacket improvements (thanks Scott)
+  - capture - updates to classifiers: telnet, mpls
+  - suricata - support timezones and slashes in signatures better
+  - suricata - support huge alert lines
+  - wise - support arrays for json elements
+
+1.8.0 2019/04/03
+  - NOTICE: This will be the last version to support ES 5
+  - NOTICE: db.pl upgrade is required
+  - all - support tokens for host.*/http.uri/http.useragent field
+  - viewer - should output csv with commas in fields correctly
+  - viewer - new Show Packets view in session detail
+  - viewer - map show xff countries
+  - capture - libfuzzer fixes
+  - capture - fix core on exit if a pcapDir doesn't exist (issue #1030)
+  - viewer - new elasticsearchTimeout var that is used with ES queries
+  - viewer - can now limit query time frame per user
+  - viewer - node stats now paginates correctly
+  - viewer - support hsts (issue #853)
+  - viewer - support simple range queries field == min-max (no spaces)
+  - viewer - Users page refactor
+
+1.7.1 2019/02/14
+  - NOTICE: db.pl upgrade is required
+  - viewer - upgrade to d3 v5 for connections page
+  - viewer - typeahead history for spigraph/connections
+  - viewer - stats tasks page has a num item selector now
+  - viewer - welcome message for new users
+  - viewer - save the last time a user used moloch
+  - viewer - two --debug will display why proxying traffic
+  - viewer - connections now uses ipv6.port and ipv4:port
+  - viewer - fix date/time picker timezone and input bugs
+  - wise - support json paths
+  - wise - improve alienvault loading
+  - capture - more tcpflags fields can be matched with rules
+  - capture - print more stats at exit with --debug
+  - capture - fix small bpf memory leak
+  - capture - rules can support most .cnt fields
+  - capture - fix OBR if cert has no serial
+  - capture - libfuzzer support and initial fixes
+  - parliament - add no alert cluster type
+  - parliament - remove selected acknowledged issues
+  - parliment - add help page
+
+
+1.7.0 2019/01/17
+  - NOTICE: db.pl upgrade is required
+  - release - node 8.15.0, cyberchef
+  - capture - new cert remainingDays field
+  - capture - new tcp initRTT field
+  - viewer - cron query notifications (issue #489)
+  - viewer - can't use es scroll api with "from" (issue #981)
+  - viewer - Export CSV uses the columns shown
+  - viewer - field history for search expression (issue #595)
+  - viewer - fix date/time picker not using user set timezone (issue #977)
+  - viewer - don’t display undefined or empty field values
+  - viewer - fix timezone parsing in session detail date field values
+  - viewer - show error if using an outdated browser (issue #980)
+  - viewer - export results intersection
+  - viewer - add clickable labels to the info column
+  - viewer - reset the width of the session table columns when switching back to the default
+  - parliament - search and page results on the issues page (issues #982 and #983)
+  - parliament - add a length of time threshold for “low packets” issues (issue #968)
+  - capture - Fixed corrupt file sequence numbers being used when
+              when ES is under heavy load
+  - capture - Fix importing more then 256 files at once not working correctly (issue #984)
+  - all - communityId support for tcp/udp (issue #966)
+  - capture - In live capture clean up sessions even if no packets are being received
+  - db - improve expire efficiency
+  - capture - fix elasticsearch classifier
+  - capture - for offline pcap honor umask when --copy is used (issue #976)
+  - viewer - Fix some rXSS, thanks Esben Sparre Andreasen of Semmle Security Research Team
+
+1.6.2 2018/12/07
+  - NOTICE: db.pl upgrade is required
+  - suricata - fix crash when signature name > 128 characters long
+  - suricata - fix severity parsing (again)
+  - capture - fix possible crash when exporting invalid utf8
+  - db - support new --shardsPerNode option
+  - viewer - don't issue search when closing the date/time pickers
+  - viewer - download packets src/dst bytes img
+  - viewer - option to show timezone with every timestamp
+  - viewer - added new user permissions (hideStats, hideFiles, hidePcap, and disablePcapDownload)
+  - parliament - add option to provide link to dashboard in alert notifications
+  - viewer - configure connection node/link popup data
+  - release - build snf plugin with screwdriver
+  - capture - fix tls parser inifite loop
+  - viewer - can customize fields in the info column
+  - viewer - new es recovery tab
+  - viewer - stats page shows when data is being loaded from server
+
+1.6.1 2018/11/06
+  - NOTICE: db.pl upgrade is required
+  - capture - ja3s support (issue #949)
+  - capture - hassh support (issue #950)
+  - capture - simpleKEKId can be a template
+  - all - Certificate org names can be an array now
+  - wise - reverse dns supports servers setting
+  - all - new written/unwritten stats to see how much Moloch has written or
+          not written to disk
+  - all - don't index packet positions or packet lengths in ES
+
+1.6.0 2018/10/29
+  - NOTICE: db.pl upgrade is required
+  - release - glib 2.56.2, yara 3.8.1, curl 7.61.1, lua 3.3.5, node 8.12.0
+  - db - expire checks min lastPacket in each session2 like curator, not just
+         based on name
+  - wise - support any field for ES WISE source
+  - viewer - packet search (hunt)
+  - viewer - admins can see forced expression for users in history
+  - viewer - option to add sessions table column configuration to a view
+  - viewer - files and stats tables can be customized
+  - suricata - parse severity
+  - capture - new _dontCheckYara rule ops
+  - parliament - add --debug option
+  - parliament - add --dasboardOnly flag
+  - capture - set vlan field for afpacket
+  - capture - new setting parseHTTPRequestHeaderAll, which will parse ALL request
+              headers not already parsed into 1 ES field (pr #914)
+  - capture - new setting parseHTTPResponseHeaderAll, which will parse ALL response
+              headers not already parsed into 1 ES field (pr #914)
+  - capture - new setting parseSMTPHeaderAll, which will parse ALL email headers
+              not already parsed into 1 ES field (pr #914)
+  - capture - new setting parseDNSRecordAll, which will parse a full DNS record
+              into multiple new ES fields (pr #914)
+  - viewer - show shortcuts on shift
+  - capture - initial gtp tunnel support (issue #926)
+  - wise - new wiseLogEvery to control how often plugin logs (0 disables)
+  - capture - experimental autoGenerateId config to use ES auto generated ids
+  - viewer - Ability to download files based on hash (pr #927)
+  - viewer - Can resize/save columns (issue #909)
+  - multiviewer - Can save user settings and such (pr #935)
+  - viewer - Can share views with all other users
+  - db.pl - New backup/restore commands, saves everything but sessions
+
+1.5.3 2018/09/10
+  - release - libpcap 1.9.0
+  - all - new hourly[2348]/hourly12 rotateIndex
+  - all - deal with talking to multiple wise servers better
+  - all - --insecure option
+  - all - use package-lock.json so all builds use the same packages
+  - viewer - fix some spiview display issues (dns ip, email headers)
+  - viewer - fix upload command tags (issue #888)
+  - viewer - aes-256-ctr: fix issues decoding larger files
+  - viewer - set rejectUnauthorized for ES connections (issue #894)
+  - viewer - fix some payloads not displaying for css reasons
+  - viewer - added zoom buttons to connections
+  - viewer - keyboard shortcuts
+  - capture - require gnu99 supporting compiler
+  - capture - if single tcp data packet left at save time, try and classify it (issue #880)
+  - capture - for live captures prevent out of order stats records
+  - capture - aes-256-ctr: iv is 12B, limit maxFileSizeG to 64G, dek is more random
+  - capture - Added corrupt setting to saveUnknownPackets
+  - capture - new -o option to override config file from command line
+  - capture - trim leading/trailing whitespace from config options
+  - capture - new --nostats option to stop stats from being sent to ES
+  - capture - fix http socket leak on errors
+  - capture - new -F option to specify files that contain a list of pcap files to process
+  - capture - new --reprocess option that won't create a new file entry (but
+              will duplicate SPI data)
+  - capture - add IPPORT_DROPPED count to stats log
+  - capture - fix some possible bad memory reads in oracle/radius/http parsers
+  - capture - fix some possible integer overflow issues
+  - capture - fix tcp sequence number issues
+  - parliament - uses Vue now
+  - parliament - support email alerts
+  - parliament - new edit slider to show edit buttons
+  - parliament - many improvements how issues work
+
+1.5.2 2018/07/26
+  - capture - new custom-fields section
+  - viewer - new custom-views section
+  - capture - fix for inplace pcap ingestion not displaying pcap in viewer, introduced in 1.5.0
+  - capture - support QUIC version >= 40
+  - release - Build Ubuntu 18.04 version
+  - wise - fixed sources that didn't register at startup
+
+1.5.1 2018/07/23
+  - capture - fix ipv6 sctp hang
+  - viewer - added back many tooltips
+  - viewer - fix crash when node doesn't exist
+  - viewer - fixed some fields not showing up
+  - snf - new config snfFlags
+  - viewer - fix sorting by a column that isn't in all indices
+  - capture - memory leak fix
+  - suricata - keep alerts for suricataExpireMinutes setting
+
+1.5.0 2018/07/16
+  - BREAKING: wiseCache redis name changes
+  - viewer - sessions, spiview, spigraph, connections, help, users, history pages implemented
+             in Vue instead of AngularJS
+  - viewer - split stats capture graphs/stats into 2 tabs
+  - viewer - stats now has sort option
+  - capture - new maxTcpOutOfOrderPackets setting, default 256
+  - capture - drophash supports v6 and saving
+  - wise - support talking to wise over https, use wiseURL
+  - capture - basic mqtt parsing
+  - capture - rules reload without restarting
+  - viewer/db - new hide-node/unhide-node commands to hide commands in capture stats
+  - viewer - New queryAllIndices
+  - multiviewer - no longer need to have the same rotateIndex everywhere
+  - capture - initial saveUnknownPackets support
+  - capture - new interfaceOps for ops per interface
+  - capture - new filenameOps for ops per filename (issue #857)
+  - s3 - use 1.0 field names
+  - viewer - fix a case when decoding failed
+  - all - ESP now has first packet capture if trackESP is set
+  - capture - magicMode remove molochmagic and added both mode
+  - wise - initial splunk source
+  - capture - new suricata plugin
+  - wise - [right-click] with no colon now loads directly from wise.ini
+  - capture - decode dns punycode into dns.host, dns.puny has original
+  - capture - yaraEveryPacket (default true) when false only does first packets
+  - capture - yaraFastMode (default true) when false turns off fast mode
+  - viewer - switch to javascript png implementation
+  - all - added some GRE erspan support
+  - viewer - support gt/lt queries for ip
+  - capture/wise - can now configure what fields map to what wise queries and
+                   send almost any field (issue #840)
+  - all - added used space stat
+  - all - changed free space stat to use 1000 based units
+  - viewer - removed AngularJS, all pages implemented in Vue
+  - capture - hsrp classify
+
+1.1.1 2018/05/31
+  - all - fix http.statuscode
+  - capture - fix _dropByDst/_dropBySrc crash
+  - capture - tcpflag are always counted (issue #849)
+  - viewer - fix 10k sessions.json failure
+
+1.1.0 2018/04/30
+  - all - basic sctp capturing, no decoding (issue #828)
+  - all - intial unencrypted 802.11 Data Frame support (issue #834)
+  - db - new segments option to expire and optimize
+  - release - curl, node, cyberchef
+  - viewer - http.uri and host* allows pasting a URL and doing the right thing (pull #831)
+  - capture - New logHTTPConnections setting (pull #749)
+  - capture - new wiseExcludeDomains setting, used before sending to wiseService (issue #340)
+              defaults to ".in-addr.arpa;.ip6.arpa"
+  - wise - full ipv6 support
+  - capture - basic sccp classify
+  - all - initial frame relay support (issue #838)
+  - all - initial 4 over 6 and 6 over 4 support
+  - viewer - support fields=id for sessions.csv (issue #839)
+  - reindex2 - added --pause option
+  - viewer - more stats page fixes
+
+1.0.0 2018/04/05
+  - db - always update stats/dstats indices for now
+  - parliament - fix es drop error msg
+  - tests - make server everything has started before running tests
+
+1.0.0-rc2 2018/03/29
+  - viewer - Change default spiDataMaxIndices to 4 everywhere
+  - viewer - work around for ES 6 issue https://github.com/elastic/elasticsearch/issues/27740
+  - capture - fixed netflow plugin
+  - tests - initial parliament tests
+
+1.0.0-rc1 2018/03/20
+  - viewer - minor stats page fixes
+  - release - new top level package.json/node_modules to make package smaller
+
+1.0.0-beta3 2018/03/15
+  - viewer - stats page implemented in Vue instead of Angular
+  - capture - some code clean and better thread safe counters
+  - viewer - convert field names in saved column sets from pre 1.0
+
+1.0.0-beta2 2018/03/08
+  - capture - decode some dhcp
+  - capture - tag a tls session with cert:self-signed
+  - capture - reload geo, rir, yara and oui files without restarting (issue #692)
+  - capture - remove yara 1.x support
+  - viewer - cron jobs now use the timestamp time and not last packet time when choosing sessions to look at
+             this means delay is shorter, although when upgrading to 1.0 some sessions will be not looked at.
+
+1.0.0-beta1 2018/02/20
+  - capture - calculate sha256 too (set supportSha256 tru)
+  - wise - support sha256 lookups
+  - capture - fix disable fields
+  - capture - src/dst ip/port can be used to trigger rules now
+  - capture - ip fields in rules can now be CIDR
+  - capture - simple writer now flushes after 10 seconds of no writting
+              there still can be pagesize bytes unwritten (issue #777)
+
+1.0.0-alpha2 2018/01/31
+  - Read alpha1 below
+  - release - correct geo files
+  - capture - set default geo file path
+
+1.0.0-alpha1 2018/01/26
+  - NOTICE: Supported ES Versions: 5.6.x, 6.x (for new installs)
+  - NOTICE: hasheader for email/http for old sessions will not be migrated
+  - all - rename all field names
+  - all - no more analyzed ES fields, everything is a keyword field
+  - all - full ipv6 support
+  - all - tags index removed, tags/hasheader stored as first class fields
+  - all - new reindex2 script to move from pre 1.0 to 1.0
+  - capture - http uri field no longer starts with // (issue #732)
+  - capture - use maxminddb instead of geoip now (issue #771)
+  - all - Country codes are now 2 letters instead of 3 letters
+  - release - node 8.9.4
+
+
+0.50.1 2018/03/29
+  - NOTICE: Supported ES Versions: >= 5.5.0, 6.x is NOT supported
+  - release - upgrade curl, yara, glib
+  - viewer - sessions.csv handle multiple fields parameters
+  - parliament - better dismissing
+  - all - new hourly6 rotateIndex, for every 6 hours
+  - parliament - first version of alerts
+  - parliament - rename server.js to parliament.js
+  - wise - trim spaces after spliting config values
+  - capture - better pop3 detection
+  - capture - correctly lowercase user
+  - release - added --install to easybutton (issue #812)
+  - capture - basic memcache classify
+  - viewer - disable TLS 1.0
+  - viewer - ES scrolling should be much faster
+
+
+0.50.0 2018/01/24
+  - NOTICE: Supported ES Versions: >= 5.5.0, 6.x is NOT supported
+  - viewer - Fixed CSV export of fields within objects (issue #790)
+  - capture - Retry http requests on connect failures
+  - capture - better SLL pcap support (issue #791)
+  - capture - icmp code and type were swapped
+  - viewer - shards tab can now exclude/include nodes/ips to move shards around
+  - capture - removed ES check for http.compression since on default in ES 5
+  - capture - clean up sockets better
+  - db.pl - now default to a max of 24 shards
+  - parliament - initial display of detected issues
+  - parliament - move all calls behind /parliament to make easier to reverse proxy
+  - viewer - users forceExpression handles special characters correctly again
+
+0.20.2 2018/01/04
+  - NOTICE: Supported ES Versions: 2.4.x, > 5.3.1, 6.x is NOT supported
+  - viewer - upgrade elasticsearch-js
+  - capture - new --host commandline option to specify how viewers should talk to host
+  - capture - added classify: dhcp, dhcpv6, splunk, isakmp, aruba-papi
+  - capture - improved classify: bitcoin, ntp, ssdp
+  - capture - index first N (default 256) bytes of post bodies, controlled by maxReqBody setting
+  - capture - more stats on packet processing/failures
+  - viewer - cleanup sessionErro
+  - viewer - remove dead code
+  - tests - more viewer tests
+  - viewer - upgrade Cyberchef to 6.8.0
+  - capture - basic mpls stripping (issue #779)
+  - viewer - start of esshards tab in stats
+  - parliament - first version (can install with Configure --parliament)
+  - wise - can now install with Configure --wise
+  - release - node 6.12.3
+
+0.20.1 2017/11/06
+  - NOTICE: Supported ES Versions: 2.4.x, 5.1.2, 5.2.x, > 5.3.1, 5.4.x, 5.5.x, 5.6.x
+  - viewer - graph hover now respects timezone setting (issue #757)
+  - capture - decode icmp type/code (issue #751)
+  - viewer - upgrade Cyberchef to 6.4.5
+  - viewer - es indices tab (#761)
+  - viewer - es tasks tab (#763)
+  - capture - ssh parser crash fixed (introduced in 0.20.0)
+
+0.20.0 2017/10/31
+  - NOTICE: Supported ES Versions: 2.4.x, 5.1.2, 5.2.x, > 5.3.1, 5.4.x, 5.5.x, 5.6.x
+  - NOTICE: db.pl upgrade is required
+  - capture - added --packetcnt from @jmd1212
+  - capture - handle monitor directory being empty
+  - capture - basic fbzero parser as quic
+  - capture - pjl, dcerpc detection
+  - release - on ubuntu, plugins weren't loading dependencies correctly
+  - viewer - made number of packets displayed setting accurate
+  - release - move node install from release to easybutton (issue #720)
+  - release - install ES 5
+  - capture - initial SMTP BDAT support
+  - viewer - initial history support
+  - capture - new advanced setting maxMemPercentage that will abort capture if reached
+  - capture - basic rip, nzsql detection
+  - capture - improved quic, mysql detection
+  - capture - plugins can now replace how SPI data is sent to ES
+  - viewer - fixed right client menu not working (issue #740)
+  - viewer - add/remove tags update tag count (PR #756)
+  - viewer - support sessions resize better
+  - release - use screwdriver to build and test
+  - release - upgrade node version
+  - viewer - fix EXISTS! being reformatted (issue #747)
+  - viewer - Don't allow * by itself in expressions anymore, must use EXISTS!
+  - viewer - removed babel, newer browsers required
+
+0.19.2 2017/08/25
+  - NOTICE: Supported ES Versions: 2.4.x, 5.1.2, 5.2.x, > 5.3.1, 5.4.x, 5.5.x, 5.6.x
+  - NOTICE: Requires wiseService upgrade if using wise
+  - capture - ja3 support (https://github.com/salesforce/ja3/) (issue #706)
+  - viewer - spi view column sets (issue #713)
+  - viewer - remove jade dependency since using pug now
+  - release - node 6.x
+  - viewer - fix world map button (issue #724)
+  - tests - viewer tests are updated and all passing again
+  - viewer - most session detail labels now have menus (issue #723)
+  - s3 - fixed deadlock (issue #716)
+  - wise - only allow 4096 waiting sessions
+  - viewer - add top 10 countries to map (#564)
+  - viewer - type ahead improvements, disable by default for multiviewer
+  - snf - fix build (issue #719)
+  - viewer - abbreviate large units for data bytes (issue #680)
+  - viewer - add href to nav tab links (issue #651)
+  - viewer - save spiview fields (issue #715)
+  - easybutton - Upgrade yara, glib, curl versions
+  - viewer - session columns are resizeable (issue #676)
+  - wise - ja3 support
+  - capture - fixed capture crash when wiseService is restarted
+  - release - build a better NOTICE file for binary releases
+  - wise - don't crash on "null" json values
+  - viewer - decode Basic auth values
+  - viewer - ES scrolling should work better
+
+0.19.1 2017/07/13
+  - NOTICE: Supported ES Versions: 2.4.x, 5.1.2, 5.2.x, > 5.3.1, 5.4.x
+  - viewer - stats bytes human readable format
+  - capture - fix wise plugin crash
+  - viewer - handle corrupt theme
+  - capture - fix quic parser crash
+  - release - libyaml as a dependency
+
+
+0.19.0 2017/07/11
   - NOTICE: Supported ES Versions: 2.4.x, 5.1.2, 5.2.x, > 5.3.1, 5.4.x
   - viewer - remove old UI
   - viewer - CyberChef integration (must always add hex decoding)
@@ -10,10 +492,14 @@
   - capture - rulesFiles and rules support
   - capture - fixed daq building
   - viewer - ES scrolling didn't work (issue #697)
+  - easybutton - Upgrade yara, glib, geoip, curl versions
+  - capture - fixed writer crash with --copy (issue #711)
+  - viewer - lots of stats tab fixes (issue #629,#655)
+  - viewer - setting for query on page load (issue #599)
+  - viewer - don't sort unsortable columns (issue #593)
+  - viewer - clipboard fixes (issue #707)
 
 0.18.3 2017/05/25
-  - NOTICE: Upgrading from versions prior to 0.18.0 or prior to ES 5 require an
-            outage for for db.pl upgrade (~5 min) see the 0.18.0 notes below.
   - NOTICE: Supported ES Versions: 2.4.x, 5.1.2, 5.2.x, > 5.3.1, 5.4.x
   - viewer - Other decodings (issues #684, #670)
   - viewer - Text lineup (issue #598)
@@ -34,9 +520,7 @@
   - db - handle _optimize vs _forcemerge
 
 0.18.2 2017/04/16
-  - NOTICE: Upgrading from versions prior to 0.18.0 require an outage for
-            db.pl upgrade (~5 min) see the 0.18.0 notes below.
-  - NOTICE: Supported ES Versions: 2.4.x, 5.1.2, 5.2.x (5.3.0 is NOT supported)
+  - NOTICE: Supported ES Versions: 2.4.x, 5.1.2, 5.2.x, > 5.3.1, 5.4.x
   - capture - New snapLen variable, by default 16384
   - release - Configure improvements
   - release - ethtool startup commands moved to moloch_config_interfaces.sh
@@ -61,8 +545,6 @@
   - release - only use systemd files if systemctl and /etc/systemd exists
 
 0.18.1 2017/03/28
-  - NOTICE: Upgrading from versions prior to 0.18 require an outage for db.pl
-            upgrade (~5 min) see the 0.18.0 notes.
   - NOTICE: Supported ES Versions: 2.4.x, 5.1.2, 5.2.x (5.3.0 is NOT supported)
   - release - node 4.8.1, lua 5.3.4, curl 7.53.1, glib2 2.52.0
   - capture - handle certs with after dates before the before date
@@ -77,8 +559,8 @@
   - NOTICE: Must upgrade wiseService BEFORE upgrading moloch-capture.
             New 0.18.0 wiseService can be used with older moloch-capture.
   - NOTICE: db.pl upgrade REQUIRES *ALL* moloch-capture to be down
-  - NOTICE: ES 2.4.x or ES > 5.1.2 required
-    ES 5 users READ: https://github.com/aol/moloch/wiki/FAQ#how-do-i-upgrade-to-es-5x
+  - NOTICE: Supported ES Versions: 2.4.x, 5.1.2, 5.2.x (5.3.0 is NOT supported)
+    ES 5 users READ: https://molo.ch/faq#how_do_i_upgrade_to_es_5x
   - NOTICE: 0.18.0 has a new look and feel. Some features have been added, removed,
     or temporarily are missing.  Feedback using slack or github issues welcome.
   - wise - md5 lookups now associated with contentType
@@ -100,10 +582,11 @@
   - capture - tpacketv3 handles multiple interfaces correctly (issue #658)
   - easybutton - singlehost and config removed, build remains for now
                  make install & make config should work
+  - capture -
 
 0.17.1 2017/01/30
   - NOTICE: ES 2.4 or ES 5.1.2 required (ES 5.x isn't recommended for production yet)
-    ES 5 users READ: https://github.com/aol/moloch/wiki/FAQ#how-do-i-upgrade-to-es-5x
+    ES 5 users READ: https://molo.ch/faq#how_do_i_upgrade_to_es_5x
   - NOTICE: Can only update directly from Moloch 0.11.1 or later
   - capture - handle missing syn/ack better
   - capture - better mongo detection
@@ -196,9 +679,6 @@
 
 0.15.0 2016/09/14
   - NOTICE: Requires ES 2.1 or later (recommend 2.4)
-  - NOTICE: See https://github.com/aol/moloch/wiki/FAQ#How_do_I_upgrade_to_ES_2x_from_ES_1x
-            to learn how to upgrade to ES 2 - db.pl upgrade is only required if going to ES 2 and
-            should be run BEFORE upgrading.
   - capture - basic flap detection
   - db.pl - fixed hourly expiration (issue #501)
   - capture - detect tcp syslog, udp sip, tcp nsclient
@@ -218,9 +698,6 @@
 
 0.14.2 2016/07/06
   - NOTICE: 0.14.x will be the last version to support ES 1.x and ES 2.0
-  - NOTICE: See https://github.com/aol/moloch/wiki/FAQ#How_do_I_upgrade_to_ES_2x_from_ES_1x
-            to learn how to upgrade to ES 2 - db.pl upgrade is only required if going to ES 2 and
-            should be run BEFORE upgrading.
   - viewer - limit autocomplete indexes searched (issue #479)
   - db.pl - support setting shards and replicas for sessions
   - capture - simple tds5 parser
@@ -292,9 +769,6 @@
 0.12.3 2016/03/28
   - NOTICE: Only ES 1.7.x and ES 2.x is supported by this version.
   - NOTICE: Requires running npm update
-  - NOTICE: See https://github.com/aol/moloch/wiki/FAQ#How_do_I_upgrade_to_ES_2x_from_ES_1x
-            to learn how to upgrade to ES 2 - db.pl upgrade is only required if going to ES 2 and
-            should be run BEFORE upgrading.
   - all - added support for ES 2
   - viewer - upgraded to express 4
   - viewer - ES load is now a single number to support ES 2

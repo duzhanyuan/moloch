@@ -26,13 +26,14 @@
 extern MolochConfig_t        config;
 
 #define MAX_RINGS 10
+#define MAX_PROCS 10
 
 LOCAL snf_handle_t           handles[MAX_INTERFACES];
 LOCAL snf_ring_t             rings[MAX_INTERFACES][MAX_RINGS];
 LOCAL int                    portnums[MAX_INTERFACES];
 LOCAL int                    snfNumRings;
-
-LOCAL struct bpf_program    *bpf_programs[MOLOCH_FILTER_MAX];
+LOCAL int                    snfNumProcs;
+LOCAL int                    snfProcNum;
 
 /******************************************************************************/
 int reader_snf_stats(MolochReaderStats_t *stats)
@@ -56,9 +57,13 @@ int reader_snf_stats(MolochReaderStats_t *stats)
     return 0;
 }
 /******************************************************************************/
-LOCAL void *reader_snf_thread(gpointer ring)
+LOCAL void *reader_snf_thread(gpointer posv)
 {
+    long full = (long)posv;
+    long pos = full & 0xff;
+    gpointer ring = rings[pos][(full >> 8) & 0xff];
     struct snf_recv_req req;
+
 
     MolochPacketBatch_t batch;
     moloch_packet_batch_init(&batch);
@@ -76,8 +81,9 @@ LOCAL void *reader_snf_thread(gpointer ring)
 
         packet->pkt           = (u_char *)req.pkt_addr;
         packet->ts.tv_sec     = req.timestamp / 1000000000;
-        packet->ts.tv_usec    = req.timestamp % 1000000000000;
+        packet->ts.tv_usec    = (req.timestamp / 1000) % 1000000;
         packet->pktlen        = req.length;
+        packet->readerPos     = pos;
 
         moloch_packet_batch(&batch, packet);
 
@@ -91,12 +97,13 @@ LOCAL void *reader_snf_thread(gpointer ring)
 void reader_snf_start() {
     moloch_packet_set_linksnap(DLT_EN10MB, config.snapLen);
 
+    int ringStartOffset = (snfProcNum-1)*snfNumRings;
     int i, r;
     for (i = 0; i < MAX_INTERFACES && config.interface[i]; i++) {
-        for (r = 0; r < snfNumRings; r++) {
+        for (r = ringStartOffset; r < (ringStartOffset+snfNumRings); r++) {
             char name[100];
             snprintf(name, sizeof(name), "moloch-snf%d-%d", i, r);
-            g_thread_new(name, &reader_snf_thread, rings[i][r]);
+            g_thread_unref(g_thread_new(name, &reader_snf_thread, (gpointer)(long)(i | r << 8)));
         }
         snf_start(handles[i]);
     }
@@ -107,7 +114,18 @@ void reader_snf_init(char *UNUSED(name))
     struct snf_ifaddrs *ifaddrs;
 
     snfNumRings = moloch_config_int(NULL, "snfNumRings", 1, 1, MAX_RINGS);
+    snfNumProcs = moloch_config_int(NULL, "snfNumProcs", 1, 1, MAX_PROCS);
+    snfProcNum  = moloch_config_int(NULL, "snfProcNum", 0, 0, MAX_PROCS);
+
+    // Quick config sanity check for clustered processes
+    if (snfNumProcs > 1 && snfProcNum == 0) {
+       LOGEXIT("Myricom: snfNumProcs set > 1 but snfProcNum not present in config");
+    } else {
+       snfProcNum = 1;
+    }
+
     int snfDataRingSize = moloch_config_int(NULL, "snfDataRingSize", 0, 0, 0x7fffffff);
+    int snfFlags = moloch_config_int(NULL, "snfFlags", -1, 0, -1);
 
     int err;
     if ( (err = snf_init(SNF_VERSION_API)) != 0) {
@@ -118,6 +136,7 @@ void reader_snf_init(char *UNUSED(name))
         LOGEXIT("Myricom: failed in snf_getifaddrs %d", err);
     }
 
+    int ringStartOffset = (snfProcNum-1)*snfNumRings;
     int i, r;
     for (i = 0; i < MAX_INTERFACES && config.interface[i]; i++) {
         struct snf_ifaddrs *ifa = ifaddrs;
@@ -135,14 +154,16 @@ void reader_snf_init(char *UNUSED(name))
             LOGEXIT("Myricom: Couldn't find interface '%s'", config.interface[i]);
         }
 
-        int err;
-        err  = snf_open(portnums[i], snfNumRings, NULL, snfDataRingSize, 0, &handles[i]);
+        err  = snf_open(portnums[i], snfNumRings * snfNumProcs, NULL, snfDataRingSize, snfFlags, &handles[i]);
         if (err != 0) {
             LOGEXIT("Myricom: Couldn't open interface '%s' %d", config.interface[i], err);
         }
 
-        for (r = 0; r < snfNumRings; r++) {
+        for (r = ringStartOffset; r < (ringStartOffset+snfNumRings); r++) {
             err = snf_ring_open(handles[i], &rings[i][r]);
+            if (err != 0) {
+                LOGEXIT("Mryicom: Couldn't open ring %d for interface '%s' %d", r, config.interface[i], err);
+            }
         }
 
     }
@@ -155,6 +176,5 @@ void reader_snf_init(char *UNUSED(name))
 /******************************************************************************/
 void moloch_plugin_init()
 {
-    LOG("ALW START");
     moloch_readers_add("snf", reader_snf_init);
 }

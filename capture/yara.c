@@ -35,8 +35,6 @@ char *moloch_yara_version() {
 #else /* YR_MAJOR_VERSION */
  #ifdef STRING_IS_HEX
     snprintf(buf, sizeof(buf), "2.x");
- #else /* STRING_IS_HEX */
-    snprintf(buf, sizeof(buf), "1.x");
  #endif /* STRING_IS_HEX */
 #endif /* YR_MAJOR_VERSION */
     return buf;
@@ -45,12 +43,11 @@ char *moloch_yara_version() {
 
 #if YR_MAJOR_VERSION == 3 && YR_MINOR_VERSION >= 4
 // Yara 3
-static YR_COMPILER *yCompiler = 0;
-static YR_COMPILER *yEmailCompiler = 0;
-static YR_RULES *yRules = 0;
-static YR_RULES *yEmailRules = 0;
-
-
+LOCAL  YR_COMPILER *yCompiler = 0;
+LOCAL  YR_COMPILER *yEmailCompiler = 0;
+LOCAL  YR_RULES    *yRules = 0;
+LOCAL  YR_RULES    *yEmailRules = 0;
+LOCAL  int         yFlags = 0;
 
 /******************************************************************************/
 void moloch_yara_report_error(int error_level, const char* file_name, int line_number, const char* error_message, void* UNUSED(user_data))
@@ -84,29 +81,74 @@ void moloch_yara_open(char *filename, YR_COMPILER **compiler, YR_RULES **rules)
     }
 }
 /******************************************************************************/
+void moloch_yara_load(char *name)
+{
+    YR_COMPILER *compiler;
+    YR_RULES *rules;
+
+    if (!name)
+        return;
+
+    moloch_yara_open(name, &compiler, &rules);
+
+    if (yRules)
+        moloch_free_later(yRules, (GDestroyNotify) yr_rules_destroy);
+    if (yCompiler)
+        moloch_free_later(yCompiler, (GDestroyNotify) yr_compiler_destroy);
+
+    yCompiler = compiler;
+    yRules = rules;
+}
+/******************************************************************************/
+void moloch_yara_load_email(char *name)
+{
+    YR_COMPILER *compiler;
+    YR_RULES *rules;
+
+    if (!name)
+        return;
+
+    moloch_yara_open(name, &compiler, &rules);
+
+    if (yEmailRules)
+        moloch_free_later(yEmailRules, (GDestroyNotify) yr_rules_destroy);
+    if (yEmailCompiler)
+        moloch_free_later(yEmailCompiler, (GDestroyNotify) yr_compiler_destroy);
+
+    yEmailCompiler = compiler;
+    yEmailRules = rules;
+}
+/******************************************************************************/
 void moloch_yara_init()
 {
+    if (moloch_config_boolean(NULL, "yaraFastMode", TRUE))
+        yFlags |= SCAN_FLAGS_FAST_MODE;
+
     yr_initialize();
 
-    moloch_yara_open(config.yara, &yCompiler, &yRules);
-    moloch_yara_open(config.emailYara, &yEmailCompiler, &yEmailRules);
+    if (config.yara)
+        moloch_config_monitor_file("yara file", config.yara, moloch_yara_load);
+
+    if (config.emailYara)
+        moloch_config_monitor_file("yara email file", config.emailYara, moloch_yara_load_email);
 }
 
 /******************************************************************************/
 int moloch_yara_callback(int message, YR_RULE* rule, MolochSession_t* session)
 {
+    if (message != CALLBACK_MSG_RULE_MATCHING)
+        return CALLBACK_CONTINUE;
+
     char tagname[256];
     const char* tag;
 
-    if (message == CALLBACK_MSG_RULE_MATCHING) {
-        snprintf(tagname, sizeof(tagname), "yara:%s", rule->identifier);
+    snprintf(tagname, sizeof(tagname), "yara:%s", rule->identifier);
+    moloch_session_add_tag(session, tagname);
+    tag = rule->tags;
+    while(tag != NULL && *tag) {
+        snprintf(tagname, sizeof(tagname), "yara:%s", tag);
         moloch_session_add_tag(session, tagname);
-        tag = rule->tags;
-        while(tag != NULL && *tag) {
-            snprintf(tagname, sizeof(tagname), "yara:%s", tag);
-            moloch_session_add_tag(session, tagname);
-            tag += strlen(tag) + 1;
-        }
+        tag += strlen(tag) + 1;
     }
 
     return CALLBACK_CONTINUE;
@@ -114,13 +156,13 @@ int moloch_yara_callback(int message, YR_RULE* rule, MolochSession_t* session)
 /******************************************************************************/
 void  moloch_yara_execute(MolochSession_t *session, const uint8_t *data, int len, int UNUSED(first))
 {
-    yr_rules_scan_mem(yRules, (uint8_t *)data, len, 0, (YR_CALLBACK_FUNC)moloch_yara_callback, session, 0);
+    yr_rules_scan_mem(yRules, (uint8_t *)data, len, yFlags, (YR_CALLBACK_FUNC)moloch_yara_callback, session, 0);
     return;
 }
 /******************************************************************************/
 void  moloch_yara_email_execute(MolochSession_t *session, const uint8_t *data, int len, int UNUSED(first))
 {
-    yr_rules_scan_mem(yEmailRules, (uint8_t *)data, len, 0, (YR_CALLBACK_FUNC)moloch_yara_callback, session, 0);
+    yr_rules_scan_mem(yEmailRules, (uint8_t *)data, len, yFlags, (YR_CALLBACK_FUNC)moloch_yara_callback, session, 0);
     return;
 }
 /******************************************************************************/
@@ -139,10 +181,10 @@ void moloch_yara_exit()
 }
 #elif defined(YR_COMPILER_H)
 // Yara 3
-static YR_COMPILER *yCompiler = 0;
-static YR_COMPILER *yEmailCompiler = 0;
-static YR_RULES *yRules = 0;
-static YR_RULES *yEmailRules = 0;
+LOCAL  YR_COMPILER *yCompiler = 0;
+LOCAL  YR_COMPILER *yEmailCompiler = 0;
+LOCAL  YR_RULES *yRules = 0;
+LOCAL  YR_RULES *yEmailRules = 0;
 
 
 /******************************************************************************/
@@ -188,18 +230,19 @@ void moloch_yara_init()
 /******************************************************************************/
 int moloch_yara_callback(int message, YR_RULE* rule, MolochSession_t* session)
 {
+    if (message != CALLBACK_MSG_RULE_MATCHING)
+        return CALLBACK_CONTINUE;
+
     char tagname[256];
     const char* tag;
 
-    if (message == CALLBACK_MSG_RULE_MATCHING) {
-        snprintf(tagname, sizeof(tagname), "yara:%s", rule->identifier);
+    snprintf(tagname, sizeof(tagname), "yara:%s", rule->identifier);
+    moloch_session_add_tag(session, tagname);
+    tag = rule->tags;
+    while(tag != NULL && *tag) {
+        snprintf(tagname, sizeof(tagname), "yara:%s", tag);
         moloch_session_add_tag(session, tagname);
-        tag = rule->tags;
-        while(tag != NULL && *tag) {
-            snprintf(tagname, sizeof(tagname), "yara:%s", tag);
-            moloch_session_add_tag(session, tagname);
-            tag += strlen(tag) + 1;
-        }
+        tag += strlen(tag) + 1;
     }
 
     return CALLBACK_CONTINUE;
@@ -232,10 +275,10 @@ void moloch_yara_exit()
 }
 #elif defined(STRING_IS_HEX)
 // Yara 2.x
-static YR_COMPILER *yCompiler = 0;
-static YR_COMPILER *yEmailCompiler = 0;
-static YR_RULES *yRules = 0;
-static YR_RULES *yEmailRules = 0;
+LOCAL  YR_COMPILER *yCompiler = 0;
+LOCAL  YR_COMPILER *yEmailCompiler = 0;
+LOCAL  YR_RULES *yRules = 0;
+LOCAL  YR_RULES *yEmailRules = 0;
 
 
 /******************************************************************************/
@@ -281,18 +324,19 @@ void moloch_yara_init()
 /******************************************************************************/
 int moloch_yara_callback(int message, YR_RULE* rule, MolochSession_t* session)
 {
+    if (message == CALLBACK_MSG_RULE_MATCHING)
+        return CALLBACK_CONTINUE;
+
     char tagname[256];
     char* tag;
 
-    if (message == CALLBACK_MSG_RULE_MATCHING) {
-        snprintf(tagname, sizeof(tagname), "yara:%s", rule->identifier);
+    snprintf(tagname, sizeof(tagname), "yara:%s", rule->identifier);
+    moloch_session_add_tag(session, tagname);
+    tag = rule->tags;
+    while(tag != NULL && *tag) {
+        snprintf(tagname, sizeof(tagname), "yara:%s", tag);
         moloch_session_add_tag(session, tagname);
-        tag = rule->tags;
-        while(tag != NULL && *tag) {
-            snprintf(tagname, sizeof(tagname), "yara:%s", tag);
-            moloch_session_add_tag(session, tagname);
-            tag += strlen(tag) + 1;
-        }
+        tag += strlen(tag) + 1;
     }
 
     return CALLBACK_CONTINUE;
@@ -324,140 +368,5 @@ void moloch_yara_exit()
     yr_finalize();
 }
 #else
-// Yara 1.x
-
-static YARA_CONTEXT *yContext[MOLOCH_MAX_PACKET_THREADS];
-static YARA_CONTEXT *yEmailContext[MOLOCH_MAX_PACKET_THREADS];
-
-
-/******************************************************************************/
-void moloch_yara_report_error(const char* file_name, int line_number, const char* error_message)
-{
-    LOG("%s:%d: %s\n", file_name, line_number, error_message);
-}
-/******************************************************************************/
-YARA_CONTEXT *moloch_yara_open(char *filename)
-{
-    YARA_CONTEXT *context;
-
-    context = yr_create_context();
-    context->error_report_function = moloch_yara_report_error;
-
-    if (filename) {
-        FILE *rule_file;
-
-        rule_file = fopen(filename, "r");
-
-        if (rule_file != NULL) {
-            yr_push_file_name(context, filename);
-
-            int errors = yr_compile_file(rule_file, context);
-
-            fclose(rule_file);
-
-            if (errors) {
-                exit (0);
-            }
-        } else {
-            printf("yara could not open file: %s\n", filename);
-            exit(1);
-        }
-    }
-    return context;
-}
-/******************************************************************************/
-void moloch_yara_init()
-{
-    yr_init();
-
-    int t;
-
-    for (t = 0; t < config.packetThreads; t++) {
-        yContext[t] = moloch_yara_open(config.yara);
-        yEmailContext[t] = moloch_yara_open(config.emailYara);
-    }
-}
-
-/******************************************************************************/
-int moloch_yara_callback(RULE* rule, MolochSession_t* session)
-{
-    char tagname[256];
-    TAG* tag;
-
-    if (rule->flags & RULE_FLAGS_MATCH) {
-        snprintf(tagname, sizeof(tagname), "yara:%s", rule->identifier);
-        moloch_session_add_tag(session, tagname);
-        tag = rule->tag_list_head;
-        while(tag != NULL) {
-            if (tag->identifier) {
-                snprintf(tagname, sizeof(tagname), "yara:%s", tag->identifier);
-                moloch_session_add_tag(session, tagname);
-            }
-            tag = tag->next;
-        }
-    }
-
-    return CALLBACK_CONTINUE;
-}
-/******************************************************************************/
-int yr_scan_mem_blocks(MEMORY_BLOCK* block, YARA_CONTEXT* context, YARACALLBACK callback, void* user_data);
-
-void  moloch_yara_execute(MolochSession_t *session, const uint8_t *data, int len, int first)
-{
-    MEMORY_BLOCK block;
-
-    if (first) {
-        block.data = (uint8_t *)data;
-        block.size = len;
-        block.base = 0;
-    } else if (len == 1) {
-        block.data = (uint8_t *)data+1;
-        block.size = len-1;
-        block.base = 1;
-    } else {
-        block.data = (uint8_t *)data+2;
-        block.size = len-2;
-        block.base = 2;
-    }
-    block.next = NULL;
-
-    yr_scan_mem_blocks(&block, yContext[session->thread], (YARACALLBACK)moloch_yara_callback, session);
-    return;
-}
-/******************************************************************************/
-void moloch_yara_email_execute(MolochSession_t *session, const uint8_t *data, int len, int first)
-{
-    MEMORY_BLOCK block;
-
-    if (!config.emailYara)
-        return;
-
-    if (first) {
-        block.data = (uint8_t *)data;
-        block.size = len;
-        block.base = 0;
-    } else if (len == 1) {
-        block.data = (uint8_t *)data+1;
-        block.size = len-1;
-        block.base = 1;
-    } else {
-        block.data = (uint8_t *)data+2;
-        block.size = len-2;
-        block.base = 2;
-    }
-    block.next = NULL;
-
-    yr_scan_mem_blocks(&block, yEmailContext[session->thread], (YARACALLBACK)moloch_yara_callback, session);
-    return;
-}
-/******************************************************************************/
-void moloch_yara_exit()
-{
-    int t;
-
-    for (t = 0; t < config.packetThreads; t++) {
-        yr_destroy_context(yContext[t]);
-        yr_destroy_context(yEmailContext[t]);
-    }
-}
+#error "Yara 1.x not supported"
 #endif

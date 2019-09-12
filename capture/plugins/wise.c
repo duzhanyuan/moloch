@@ -33,22 +33,29 @@ LOCAL uint32_t              maxCache;
 LOCAL uint32_t              cacheSecs;
 LOCAL char                  tcpTuple;
 LOCAL char                  udpTuple;
+LOCAL uint32_t              logEvery;
 
-LOCAL int                   httpHostField;
-LOCAL int                   httpXffField;
-LOCAL int                   httpMd5Field;
-LOCAL int                   emailMd5Field;
-LOCAL int                   emailSrcField;
-LOCAL int                   emailDstField;
-LOCAL int                   dnsHostField;
-LOCAL int                   tagsField;
-LOCAL int                   httpUrlField;
+
 LOCAL int                   protocolField;
 
 LOCAL uint32_t              fieldsTS;
-LOCAL int                   fieldsMap[256];
+
+#define FIELDS_MAP_MAX      21
+LOCAL int                   fieldsMap[FIELDS_MAP_MAX][MOLOCH_FIELDS_DB_MAX];
+LOCAL char                 *fieldsMapHash[FIELDS_MAP_MAX];
+LOCAL int                   fieldsMapCnt;
 
 LOCAL uint32_t              inflight;
+
+LOCAL char                **wiseExcludeDomains;
+LOCAL int                  *wiseExcludeDomainsLen;
+LOCAL int                   wiseExcludeDomainsNum;
+
+LOCAL char                 *wiseURL;
+LOCAL int                   wisePort;
+LOCAL char                 *wiseHost;
+
+LOCAL char                  wiseGetURI[4096];
 
 LOCAL const int validDNS[256] = {
     ['-'] = 1,
@@ -64,9 +71,12 @@ LOCAL const int validDNS[256] = {
 #define INTEL_TYPE_EMAIL   3
 #define INTEL_TYPE_URL     4
 #define INTEL_TYPE_TUPLE   5
-#define INTEL_TYPE_SIZE    6
+#define INTEL_TYPE_JA3     6
+#define INTEL_TYPE_SHA256  7
+#define INTEL_TYPE_NUM_PRE 8
+#define INTEL_TYPE_SIZE    32
 
-LOCAL char *wiseStrings[] = {"ip", "domain", "md5", "email", "url", "tuple"};
+#define INTEL_TYPE_MAX_FIELDS  32
 
 #define INTEL_STAT_LOOKUP     0
 #define INTEL_STAT_CACHE      1
@@ -88,8 +98,8 @@ typedef struct wiseitem {
     char                 *key;
 
     uint32_t              loadTime;
-    short                 sessionsSize;
-    short                 numSessions;
+    uint16_t              sessionsSize;
+    uint16_t              numSessions;
     char                  type;
 } WiseItem_t;
 
@@ -101,21 +111,35 @@ typedef struct wiseitem_head {
     uint32_t              wil_count;
 } WiseItemHead_t;
 
+#define WISE_MAX_REQUEST_ITEMS 512
 typedef struct wiserequest {
     BSB          bsb;
-    WiseItem_t  *items[256];
+    WiseItem_t  *items[WISE_MAX_REQUEST_ITEMS];
     int          numItems;
 } WiseRequest_t;
 
 typedef HASH_VAR(h_, WiseItemHash_t, WiseItemHead_t, 199337);
 
-WiseItemHash_t itemHash[INTEL_TYPE_SIZE];
-WiseItemHead_t itemList[INTEL_TYPE_SIZE];
+struct {
+    char           *name;
+    WiseItemHash_t  itemHash;
+    WiseItemHead_t  itemList;
+    int             fields[INTEL_TYPE_MAX_FIELDS];
+    char            fieldsLen;
+    char            nameLen;
+} types[INTEL_TYPE_SIZE];
+
+int            numTypes = INTEL_TYPE_NUM_PRE;
 
 LOCAL MOLOCH_LOCK_DEFINE(item);
 
 /******************************************************************************/
-int wise_item_cmp(const void *keyv, const void *elementv)
+LOCAL WiseRequest_t *iRequest = 0;
+LOCAL MOLOCH_LOCK_DEFINE(iRequest);
+LOCAL char          *iBuf = 0;
+
+/******************************************************************************/
+LOCAL int wise_item_cmp(const void *keyv, const void *elementv)
 {
     char *key = (char*)keyv;
     WiseItem_t *element = (WiseItem_t *)elementv;
@@ -123,56 +147,76 @@ int wise_item_cmp(const void *keyv, const void *elementv)
     return strcmp(key, element->key) == 0;
 }
 /******************************************************************************/
-void wise_print_stats()
+LOCAL void wise_print_stats()
 {
-    int i;
-    for (i = 0; i < INTEL_TYPE_SIZE; i++) {
+    for (int i = 0; i < numTypes; i++) {
         LOG("%8s lookups:%7d cache:%7d requests:%7d inprogress:%7d fail:%7d hash:%7d list:%7d",
-            wiseStrings[i],
+            types[i].name,
             stats[i][0],
             stats[i][1],
             stats[i][2],
             stats[i][3],
             stats[i][4],
-            HASH_COUNT(wih_, itemHash[i]),
-            DLL_COUNT(wil_, &itemList[i]));
+            HASH_COUNT(wih_, types[i].itemHash),
+            DLL_COUNT(wil_, &types[i].itemList));
     }
 }
 /******************************************************************************/
-void wise_load_fields()
+LOCAL void wise_load_fields()
 {
     char                key[500];
     int                 key_len;
 
-    memset(fieldsMap, -1, sizeof(fieldsMap));
+    memset(fieldsMap[0], -1, sizeof(fieldsMap[0]));
 
-    key_len = snprintf(key, sizeof(key), "/fields");
+    key_len = snprintf(key, sizeof(key), "/fields?ver=1");
     size_t         data_len;
     unsigned char *data = moloch_http_send_sync(wiseService, "GET", key, key_len, NULL, 0, NULL, &data_len);;
 
     BSB bsb;
     BSB_INIT(bsb, data, data_len);
 
-    int ver, cnt = 0;
+    int ver = -1, cnt = 0;
     BSB_IMPORT_u32(bsb, fieldsTS);
     BSB_IMPORT_u32(bsb, ver);
-    BSB_IMPORT_u08(bsb, cnt);
 
-    int i;
-    for (i = 0; i < cnt; i++) {
+    if (ver < 0 || ver > 1) {
+        if (wiseURL) {
+            LOGEXIT("Verify wiseURL value of `%s` version: %d - %s",
+                    wiseURL, ver,
+                    (ver == -1?"Couldn't connect to WISE":"Unsupported version"));
+        } else {
+            LOGEXIT("Verify wiseHost:wisePort value of `%s:%d` version: %d - %s",
+                    wiseHost, wisePort, ver,
+                    (ver == -1?"Couldn't connect to WISE":"Unsupported version"));
+        }
+    }
+
+    if (ver == 0) {
+        BSB_IMPORT_u08(bsb, cnt);
+    } else if (ver == 1) {
+        BSB_IMPORT_u16(bsb, cnt);
+    }
+
+    if (cnt > MOLOCH_FIELDS_DB_MAX) {
+        LOGEXIT("Wise server is returning too many fields %d > %d", cnt, MOLOCH_FIELDS_DB_MAX);
+    }
+
+    for (int i = 0; i < cnt; i++) {
         int len = 0;
         BSB_IMPORT_u16(bsb, len); // len includes NULL terminated
-        fieldsMap[i] = moloch_field_define_text((char*)BSB_WORK_PTR(bsb), NULL);
-        if (fieldsMap[i] == -1)
+        fieldsMap[0][i] = moloch_field_define_text((char*)BSB_WORK_PTR(bsb), NULL);
+        if (fieldsMap[0][i] == -1) {
             fieldsTS = 0;
-        if (config.debug)
-            LOG("%d %d %s", i, fieldsMap[i], BSB_WORK_PTR(bsb));
+            if (config.debug)
+                LOG("Couldn't define field - %d %d %s", i, fieldsMap[0][i], BSB_WORK_PTR(bsb));
+        }
         BSB_IMPORT_skip(bsb, len);
     }
     free(data);
 }
 /******************************************************************************/
-void wise_session_cmd_cb(MolochSession_t *session, gpointer uw1, gpointer UNUSED(uw2))
+LOCAL void wise_session_cmd_cb(MolochSession_t *session, gpointer uw1, gpointer UNUSED(uw2))
 {
     WiseItem_t    *wi = uw1;
 
@@ -182,22 +226,27 @@ void wise_session_cmd_cb(MolochSession_t *session, gpointer uw1, gpointer UNUSED
     moloch_session_decr_outstanding(session);
 }
 /******************************************************************************/
-void wise_free_item_unlocked(WiseItem_t *wi)
+LOCAL void wise_free_item(WiseItem_t *wi)
 {
-    int i;
-    HASH_REMOVE(wih_, itemHash[(int)wi->type], wi);
-    if (wi->sessions) {
-        for (i = 0; i < wi->numSessions; i++) {
-            moloch_session_add_cmd(wi->sessions[i], MOLOCH_SES_CMD_FUNC, NULL, NULL, wise_session_cmd_cb);
-        }
-        g_free(wi->sessions);
-    }
     g_free(wi->key);
     moloch_field_ops_free(&wi->ops);
     MOLOCH_TYPE_FREE(WiseItem_t, wi);
 }
 /******************************************************************************/
-void wise_cb(int UNUSED(code), unsigned char *data, int data_len, gpointer uw)
+LOCAL void wise_remove_item_locked(WiseItem_t *wi)
+{
+    HASH_REMOVE(wih_, types[(int)wi->type].itemHash, wi);
+    if (wi->sessions) {
+        for (int i = 0; i < wi->numSessions; i++) {
+            moloch_session_add_cmd(wi->sessions[i], MOLOCH_SES_CMD_FUNC, NULL, NULL, wise_session_cmd_cb);
+        }
+        g_free(wi->sessions);
+        wi->sessions = 0;
+    }
+    moloch_free_later(wi, (GDestroyNotify) wise_free_item);
+}
+/******************************************************************************/
+LOCAL void wise_cb(int UNUSED(code), unsigned char *data, int data_len, gpointer uw)
 {
 
     BSB             bsb;
@@ -208,56 +257,105 @@ void wise_cb(int UNUSED(code), unsigned char *data, int data_len, gpointer uw)
 
     BSB_INIT(bsb, data, data_len);
 
-    uint32_t fts = 0, ver = 0;
+    uint32_t fts = 0, ver = 0xffffffff;
     BSB_IMPORT_u32(bsb, fts);
     BSB_IMPORT_u32(bsb, ver);
 
-    if (BSB_IS_ERROR(bsb) || ver != 0) {
+    if (BSB_IS_ERROR(bsb) || (ver != 0 && ver != 2)) {
         MOLOCH_LOCK(item);
         for (i = 0; i < request->numItems; i++) {
-            wise_free_item_unlocked(request->items[i]);
+            wise_remove_item_locked(request->items[i]);
         }
         MOLOCH_UNLOCK(item);
         MOLOCH_TYPE_FREE(WiseRequest_t, request);
         return;
     }
 
-    if (fts != fieldsTS)
+    if (ver == 0 && fts != fieldsTS)
         wise_load_fields();
+
+    int hashPos = 0;
+    if (ver == 2) {
+        unsigned char *hash;
+        BSB_IMPORT_ptr(bsb, hash, 32);
+
+        int cnt = 0;
+        BSB_IMPORT_u16(bsb, cnt);
+
+        MOLOCH_LOCK(item);
+        for (hashPos = 0; hashPos < fieldsMapCnt; hashPos++) {
+            if (memcmp(hash, fieldsMapHash[hashPos], 32) == 0)
+                break;
+        }
+
+        if (config.debug)
+            LOG("WISE Response %32.32s cnt %d pos %d", hash, cnt, hashPos);
+
+        if (hashPos == FIELDS_MAP_MAX)
+            LOGEXIT("Too many unique wise hashs");
+
+        if (hashPos == fieldsMapCnt) {
+            fieldsMapHash[hashPos] = g_strndup((gchar*)hash, 32);
+            fieldsMapCnt++;
+            sprintf(wiseGetURI, "/get?ver=2");
+            if (fieldsMapCnt > 0) {
+                strcat(wiseGetURI, "&hashes=");
+                strcat(wiseGetURI, fieldsMapHash[0]);
+                for (i = 1; i < fieldsMapCnt; i++) {
+                    strcat(wiseGetURI, ",");
+                    strcat(wiseGetURI, fieldsMapHash[i]);
+                }
+            }
+        }
+
+        if (cnt)
+            memset(fieldsMap[hashPos], -1, sizeof(fieldsMap[hashPos]));
+
+        for (i = 0; i < cnt; i++) {
+            int len = 0;
+            BSB_IMPORT_u16(bsb, len); // len includes NULL terminated
+            fieldsMap[0][i] = moloch_field_define_text((char*)BSB_WORK_PTR(bsb), NULL);
+            if (fieldsMap[0][i] == -1)
+                fieldsTS = 0;
+            if (config.debug)
+                LOG("Couldn't define field - %d %d %s", i, fieldsMap[0][i], BSB_WORK_PTR(bsb));
+            BSB_IMPORT_skip(bsb, len);
+        }
+        MOLOCH_UNLOCK(item);
+    }
 
     struct timeval currentTime;
     gettimeofday(&currentTime, NULL);
 
     for (i = 0; i < request->numItems; i++) {
+        MOLOCH_LOCK(item);
         WiseItem_t    *wi = request->items[i];
         int numOps = 0;
         BSB_IMPORT_u08(bsb, numOps);
 
         moloch_field_ops_init(&wi->ops, numOps, MOLOCH_FIELD_OPS_FLAGS_COPY);
-        if (numOps > 0) {
-            int i;
-            for (i = 0; i < numOps; i++) {
+        for (int o = 0; o < numOps; o++) {
 
-                int rfield = 0;
-                BSB_IMPORT_u08(bsb, rfield);
-                int fieldPos = fieldsMap[rfield];
+            int rfield = 0;
+            BSB_IMPORT_u08(bsb, rfield);
+            int fieldPos = fieldsMap[hashPos][rfield];
 
-                if (fieldPos == -1) {
-                    LOG("Couldn't find pos %d", rfield);
-                    continue;
-                }
+            int len = 0;
+            BSB_IMPORT_u08(bsb, len);
+            char *str = (char*)BSB_WORK_PTR(bsb);
+            BSB_IMPORT_skip(bsb, len);
 
-                int len = 0;
-                BSB_IMPORT_u08(bsb, len);
-                char *str = (char*)BSB_WORK_PTR(bsb);
-                BSB_IMPORT_skip(bsb, len);
-
-                moloch_field_ops_add(&wi->ops, fieldPos, str, len - 1);
+            if (fieldPos == -1) {
+                LOG("Couldn't find pos %d", rfield);
+                continue;
             }
+
+            moloch_field_ops_add(&wi->ops, fieldPos, str, len - 1);
         }
 
         wi->loadTime = currentTime.tv_sec;
 
+        // Schedule updates on waiting sessions
         int s;
         for (s = 0; s < wi->numSessions; s++) {
             moloch_session_add_cmd(wi->sessions[s], MOLOCH_SES_CMD_FUNC, wi, NULL, wise_session_cmd_cb);
@@ -266,53 +364,58 @@ void wise_cb(int UNUSED(code), unsigned char *data, int data_len, gpointer uw)
         wi->sessions = 0;
         wi->numSessions = 0;
 
-        MOLOCH_LOCK(item);
-        DLL_PUSH_HEAD(wil_, &itemList[(int)wi->type], wi);
+        DLL_PUSH_HEAD(wil_, &types[(int)wi->type].itemList, wi);
         // Cache needs to be reduced
-        if (itemList[(int)wi->type].wil_count > maxCache) {
-            DLL_POP_TAIL(wil_, &itemList[(int)wi->type], wi);
-            wise_free_item_unlocked(wi);
+        if (types[(int)wi->type].itemList.wil_count > maxCache) {
+            DLL_POP_TAIL(wil_, &types[(int)wi->type].itemList, wi);
+            wise_remove_item_locked(wi);
         }
         MOLOCH_UNLOCK(item);
     }
     MOLOCH_TYPE_FREE(WiseRequest_t, request);
 }
 /******************************************************************************/
-void wise_lookup(MolochSession_t *session, WiseRequest_t *request, char *value, int type)
+LOCAL void wise_lookup(MolochSession_t *session, WiseRequest_t *request, char *value, int type)
 {
 
     if (*value == 0)
         return;
 
-    if (request->numItems >= 256)
+    if (request->numItems >= WISE_MAX_REQUEST_ITEMS)
         return;
 
-    MOLOCH_LOCK(item);
-
     static int lookups = 0;
-    WiseItem_t *wi;
 
     lookups++;
-    if ((lookups % 10000) == 0)
+    if (logEvery != 0 && (lookups % logEvery) == 0)
         wise_print_stats();
 
     stats[type][INTEL_STAT_LOOKUP]++;
 
-    HASH_FIND(wih_, itemHash[type], value, wi);
+    struct timeval currentTime;
+    gettimeofday(&currentTime, NULL);
+
+    MOLOCH_LOCK(item);
+    WiseItem_t *wi;
+    HASH_FIND(wih_, types[type].itemHash, value, wi);
 
     if (wi) {
         // Already being looked up
         if (wi->sessions) {
-            if (wi->numSessions < wi->sessionsSize) {
-                wi->sessions[wi->numSessions++] = session;
-                moloch_session_incr_outstanding(session);
+            if (wi->numSessions >= 4096) {
+                stats[type][INTEL_STAT_FAIL]++;
+                goto cleanup;
             }
+
+            if (wi->numSessions >= wi->sessionsSize) {
+                wi->sessionsSize = MIN(wi->sessionsSize*2, 4096);
+                wi->sessions = realloc(wi->sessions, sizeof(MolochSession_t *) * wi->sessionsSize);
+            }
+            wi->sessions[wi->numSessions++] = session;
+            moloch_session_incr_outstanding(session);
             stats[type][INTEL_STAT_INPROGRESS]++;
             goto cleanup;
         }
-
-        struct timeval currentTime;
-        gettimeofday(&currentTime, NULL);
 
         if (wi->loadTime + cacheSecs > currentTime.tv_sec) {
             moloch_field_ops_run(session, &wi->ops);
@@ -321,15 +424,15 @@ void wise_lookup(MolochSession_t *session, WiseRequest_t *request, char *value, 
         }
 
         /* Had it in cache, but it is too old */
-        DLL_REMOVE(wil_, &itemList[type], wi);
+        DLL_REMOVE(wil_, &types[type].itemList, wi);
         moloch_field_ops_free(&wi->ops);
     } else {
         // Know nothing about it
         wi = MOLOCH_TYPE_ALLOC0(WiseItem_t);
         wi->key          = g_strdup(value);
         wi->type         = type;
-        wi->sessionsSize = 20;
-        HASH_ADD(wih_, itemHash[type], wi->key, wi);
+        wi->sessionsSize = 4;
+        HASH_ADD(wih_, types[type].itemHash, wi->key, wi);
     }
 
     wi->sessions = malloc(sizeof(MolochSession_t *) * wi->sessionsSize);
@@ -338,7 +441,12 @@ void wise_lookup(MolochSession_t *session, WiseRequest_t *request, char *value, 
 
     stats[type][INTEL_STAT_REQUEST]++;
 
-    BSB_EXPORT_u08(request->bsb, type);
+    if (type < INTEL_TYPE_NUM_PRE) {
+        BSB_EXPORT_u08(request->bsb, type);
+    } else {
+        BSB_EXPORT_u08(request->bsb, types[type].nameLen | 0x80);
+        BSB_EXPORT_ptr(request->bsb, types[type].name, types[type].nameLen);
+    }
     int len = strlen(value);
     BSB_EXPORT_u16(request->bsb, len);
     BSB_EXPORT_ptr(request->bsb, value, len);
@@ -349,8 +457,16 @@ cleanup:
     MOLOCH_UNLOCK(item);
 }
 /******************************************************************************/
-void wise_lookup_domain(MolochSession_t *session, WiseRequest_t *request, char *domain)
+LOCAL void wise_lookup_domain(MolochSession_t *session, WiseRequest_t *request, char *domain)
 {
+    // Skip leading http
+    if (*domain == 'h') {
+        if (strncmp(domain, "http://", 7) == 0)
+            domain += 7;
+        else if (strncmp(domain, "https://", 8) == 0)
+            domain += 8;
+    }
+
     unsigned char *end = (unsigned char*)domain;
     unsigned char *colon = 0;
     int            period = 0;
@@ -391,17 +507,30 @@ void wise_lookup_domain(MolochSession_t *session, WiseRequest_t *request, char *
         return;
     }
 
+    int l = strlen(domain);
+    for (int i = 0; i < wiseExcludeDomainsNum; i++) {
+        if (l > wiseExcludeDomainsLen[i] && memcmp(domain + l - wiseExcludeDomainsLen[i], wiseExcludeDomains[i], wiseExcludeDomainsLen[i]) == 0) {
+            goto cleanup;
+        }
+    }
+
     wise_lookup(session, request, domain, INTEL_TYPE_DOMAIN);
 
+cleanup:
     if (colon)
         *colon = ':';
 }
 /******************************************************************************/
-void wise_lookup_ip(MolochSession_t *session, WiseRequest_t *request, uint32_t ip)
+void wise_lookup_ip(MolochSession_t *session, WiseRequest_t *request, struct in6_addr *ip6)
 {
-    char ipstr[18];
+    char ipstr[INET6_ADDRSTRLEN];
 
-    snprintf(ipstr, sizeof(ipstr), "%d.%d.%d.%d", ip & 0xff, (ip >> 8) & 0xff, (ip >> 16) & 0xff, (ip >> 24) & 0xff);
+    if (IN6_IS_ADDR_V4MAPPED(ip6)) {
+        uint32_t ip = MOLOCH_V6_TO_V4(*ip6);
+        snprintf(ipstr, sizeof(ipstr), "%u.%u.%u.%u", ip & 0xff, (ip >> 8) & 0xff, (ip >> 16) & 0xff, (ip >> 24) & 0xff);
+    } else {
+        inet_ntop(AF_INET6, ip6, ipstr, sizeof(ipstr));
+    }
 
     wise_lookup(session, request, ipstr, INTEL_TYPE_IP);
 }
@@ -412,10 +541,6 @@ void wise_lookup_tuple(MolochSession_t *session, WiseRequest_t *request)
     BSB     bsb;
 
     BSB_INIT(bsb, str, sizeof(str));
-
-    uint32_t ip1 = MOLOCH_V6_TO_V4(session->addr1);
-    uint32_t ip2 = MOLOCH_V6_TO_V4(session->addr2);
-
     BSB_EXPORT_sprintf(bsb, "%ld;", session->firstPacket.tv_sec);
 
     int first = 1;
@@ -429,19 +554,48 @@ void wise_lookup_tuple(MolochSession_t *session, WiseRequest_t *request)
         }
         BSB_EXPORT_ptr(bsb, hstring->str, hstring->len);
     );
+    
+    if (IN6_IS_ADDR_V4MAPPED(&session->addr1)) {
+      
+      uint32_t ip1 = MOLOCH_V6_TO_V4(session->addr1);
+      uint32_t ip2 = MOLOCH_V6_TO_V4(session->addr2);
 
-    BSB_EXPORT_sprintf(bsb, ";%d.%d.%d.%d;%d;%d.%d.%d.%d;%d",
-                       ip1 & 0xff, (ip1 >> 8) & 0xff, (ip1 >> 16) & 0xff, (ip1 >> 24) & 0xff,
-                       session->port1,
-                       ip2 & 0xff, (ip2 >> 8) & 0xff, (ip2 >> 16) & 0xff, (ip2 >> 24) & 0xff,
-                       session->port2
-                      );
-
+      BSB_EXPORT_sprintf(bsb, ";%u.%u.%u.%u;%u;%u.%u.%u.%u;%u",
+                         ip1 & 0xff, (ip1 >> 8) & 0xff, (ip1 >> 16) & 0xff, (ip1 >> 24) & 0xff,
+                         session->port1,
+                         ip2 & 0xff, (ip2 >> 8) & 0xff, (ip2 >> 16) & 0xff, (ip2 >> 24) & 0xff,
+                         session->port2
+                        );
+    } else {
+      // inet_ntop(AF_INET6, ip6, ipstr, sizeof(ipstr));
+      char ipstr1[INET6_ADDRSTRLEN];
+      char ipstr2[INET6_ADDRSTRLEN];
+      
+      inet_ntop(AF_INET6, &session->addr1, ipstr1, sizeof(ipstr1));
+      inet_ntop(AF_INET6, &session->addr2, ipstr2, sizeof(ipstr2));
+      
+      BSB_EXPORT_sprintf(bsb, ";%s;%u;%s;%u",
+                         ipstr1,
+                         session->port1,
+                         ipstr2,
+                         session->port2
+                        );
+      
+      
+    }
     wise_lookup(session, request, str, INTEL_TYPE_TUPLE);
 }
 /******************************************************************************/
 void wise_lookup_url(MolochSession_t *session, WiseRequest_t *request, char *url)
 {
+    // Skip leading http
+    if (*url == 'h') {
+        if (memcmp(url, "http://", 7) == 0)
+            url += 7;
+        else if (memcmp(url, "https://", 8) == 0)
+            url += 8;
+    }
+
     char *question = strchr(url, '?');
     if (question) {
         *question = 0;
@@ -452,17 +606,13 @@ void wise_lookup_url(MolochSession_t *session, WiseRequest_t *request, char *url
     }
 }
 /******************************************************************************/
-LOCAL WiseRequest_t *iRequest = 0;
-LOCAL MOLOCH_LOCK_DEFINE(iRequest);
-LOCAL char          *iBuf = 0;
-/******************************************************************************/
 LOCAL void wise_flush_locked()
 {
     if (!iRequest || iRequest->numItems == 0)
         return;
 
     inflight += iRequest->numItems;
-    if (moloch_http_send(wiseService, "POST", "/get", 4, iBuf, BSB_LENGTH(iRequest->bsb), NULL, TRUE, wise_cb, iRequest) != 0) {
+    if (moloch_http_send(wiseService, "POST", wiseGetURI, -1, iBuf, BSB_LENGTH(iRequest->bsb), NULL, TRUE, wise_cb, iRequest) != 0) {
         LOG("Wise - request failed %p for %d items", iRequest, iRequest->numItems);
         wise_cb(500, NULL, 0, iRequest);
     }
@@ -482,8 +632,7 @@ LOCAL gboolean wise_flush(gpointer UNUSED(user_data))
 
 void wise_plugin_pre_save(MolochSession_t *session, int UNUSED(final))
 {
-    MolochString_t *hstring;
-    uint32_t        i;
+    MolochString_t *hstring = NULL;
 
     MOLOCH_LOCK(iRequest);
     if (!iRequest) {
@@ -493,90 +642,84 @@ void wise_plugin_pre_save(MolochSession_t *session, int UNUSED(final))
         iRequest->numItems = 0;
     }
 
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wstrict-aliasing"
     //IPs
-    //ALW Fix - when wise supports v6
-    if (IN6_IS_ADDR_V4MAPPED(&session->addr1)) {
-        wise_lookup_ip(session, iRequest, MOLOCH_V6_TO_V4(session->addr1));
-    }
+    wise_lookup_ip(session, iRequest, &session->addr1);
+    wise_lookup_ip(session, iRequest, &session->addr2);
 
-    if (IN6_IS_ADDR_V4MAPPED(&session->addr2)) {
-        wise_lookup_ip(session, iRequest, MOLOCH_V6_TO_V4(session->addr2));
-    }
+#pragma GCC diagnostic pop
 
-
-    //Domains
-    if (session->fields[httpHostField]) {
-        MolochStringHashStd_t *shash = session->fields[httpHostField]->shash;
-        HASH_FORALL(s_, *shash, hstring,
-            if (hstring->str[0] == 'h') {
-                if (memcmp(hstring->str, "http://", 7) == 0)
-                    wise_lookup_domain(session, iRequest, hstring->str+7);
-                else if (memcmp(hstring->str, "https://", 8) == 0)
-                    wise_lookup_domain(session, iRequest, hstring->str+8);
-                else
-                    wise_lookup_domain(session, iRequest, hstring->str);
-            } else
-                wise_lookup_domain(session, iRequest, hstring->str);
-        );
-    }
-    if (session->fields[dnsHostField]) {
-        MolochStringHashStd_t *shash = session->fields[dnsHostField]->shash;
-        HASH_FORALL(s_, *shash, hstring,
-            if (hstring->str[0] == '<')
+    int type, i;
+    for (type = 0; type < numTypes; type++) {
+        for (i = 0; i < types[type].fieldsLen; i++) {
+            int pos = types[type].fields[i];
+            if (!session->fields[pos])
                 continue;
-            wise_lookup_domain(session, iRequest, hstring->str);
-        );
-    }
 
-    //MD5s
-    if (session->fields[httpMd5Field]) {
-        MolochStringHashStd_t *shash = session->fields[httpMd5Field]->shash;
-        HASH_FORALL(s_, *shash, hstring,
-            if (hstring->uw) {
-                char str[1000];
-                snprintf(str, sizeof(str), "%s;%s", hstring->str, hstring->uw);
-                wise_lookup(session, iRequest, str, INTEL_TYPE_MD5);
-            } else {
-                wise_lookup(session, iRequest, hstring->str, INTEL_TYPE_MD5);
-            }
-        );
-    }
+            MolochStringHashStd_t *shash;
+            gpointer               ikey;
+            GHashTable            *ghash;
+            GHashTableIter         iter;
+            char                   buf[20];
 
-    if (session->fields[emailMd5Field]) {
-        MolochStringHashStd_t *shash = session->fields[emailMd5Field]->shash;
-        HASH_FORALL(s_, *shash, hstring,
-            wise_lookup(session, iRequest, hstring->str, INTEL_TYPE_MD5);
-        );
-    }
-
-    //Email
-    if (session->fields[emailSrcField]) {
-        MolochStringHashStd_t *shash = session->fields[emailSrcField]->shash;
-        HASH_FORALL(s_, *shash, hstring,
-            wise_lookup(session, iRequest, hstring->str, INTEL_TYPE_EMAIL);
-        );
-    }
-
-    if (session->fields[emailDstField]) {
-        MolochStringHashStd_t *shash = session->fields[emailDstField]->shash;
-        HASH_FORALL(s_, *shash, hstring,
-            wise_lookup(session, iRequest, hstring->str, INTEL_TYPE_EMAIL);
-        );
-    }
-
-    //URLs
-    if (session->fields[httpUrlField]) {
-        GPtrArray *sarray =  session->fields[httpUrlField]->sarray;
-
-        for(i = 0; i < sarray->len; i++) {
-            char *str = g_ptr_array_index(sarray, i);
-
-            if (str[0] == '/') {
-                wise_lookup_url(session, iRequest, str+2);
-            } else if (str[0] == 'h' && memcmp("http://", str, 7) == 0) {
-                wise_lookup_url(session, iRequest, str+7);
-            } else
-                wise_lookup_url(session, iRequest, str);
+            switch(config.fields[pos]->type) {
+            case MOLOCH_FIELD_TYPE_INT:
+                snprintf(buf, sizeof(buf), "%d", session->fields[pos]->i);
+                wise_lookup(session, iRequest, buf, type);
+                break;
+            case MOLOCH_FIELD_TYPE_INT_GHASH:
+                ghash = session->fields[pos]->ghash;
+                g_hash_table_iter_init (&iter, ghash);
+                while (g_hash_table_iter_next (&iter, &ikey, NULL)) {
+                    snprintf(buf, sizeof(buf), "%d", (int)(long)ikey);
+                    wise_lookup(session, iRequest, buf, type);
+                }
+                break;
+            case MOLOCH_FIELD_TYPE_IP:
+                wise_lookup_ip(session, iRequest, (struct in6_addr *)session->fields[pos]->ip);
+                break;
+            case MOLOCH_FIELD_TYPE_IP_GHASH:
+                ghash = session->fields[pos]->ghash;
+                g_hash_table_iter_init (&iter, ghash);
+                while (g_hash_table_iter_next (&iter, &ikey, NULL)) {
+                    wise_lookup_ip(session, iRequest, (struct in6_addr *)ikey);
+                }
+                break;
+            case MOLOCH_FIELD_TYPE_STR:
+                if (type == INTEL_TYPE_DOMAIN)
+                    wise_lookup_domain(session, iRequest, session->fields[pos]->str);
+                else
+                    wise_lookup(session, iRequest, session->fields[pos]->str, type);
+                break;
+            case MOLOCH_FIELD_TYPE_STR_HASH:
+                shash = session->fields[pos]->shash;
+                HASH_FORALL(s_, *shash, hstring,
+                    if (type == INTEL_TYPE_DOMAIN)
+                        wise_lookup_domain(session, iRequest, hstring->str);
+                    else if (type == INTEL_TYPE_URL)
+                        wise_lookup_url(session, iRequest, hstring->str);
+                    else if (hstring->uw) {
+                        char str[1000];
+                        snprintf(str, sizeof(str), "%s;%s", hstring->str, (char*)hstring->uw);
+                        wise_lookup(session, iRequest, str, type);
+                    } else {
+                        wise_lookup(session, iRequest, hstring->str, type);
+                    }
+                );
+                break;
+            case MOLOCH_FIELD_TYPE_STR_GHASH:
+                ghash = session->fields[pos]->ghash;
+                g_hash_table_iter_init (&iter, ghash);
+                while (g_hash_table_iter_next (&iter, &ikey, NULL)) {
+                    if (type == INTEL_TYPE_DOMAIN)
+                        wise_lookup_domain(session, iRequest, hstring->str);
+                    else if (type == INTEL_TYPE_URL)
+                        wise_lookup_url(session, iRequest, hstring->str);
+                    else
+                        wise_lookup(session, iRequest, ikey, type);
+                }
+            } /* switch */
         }
     }
 
@@ -586,28 +729,33 @@ void wise_plugin_pre_save(MolochSession_t *session, int UNUSED(final))
         wise_lookup_tuple(session, iRequest);
     }
 
-    if (iRequest->numItems > 128) {
+    if (iRequest->numItems > WISE_MAX_REQUEST_ITEMS/2) {
         wise_flush_locked();
     }
     MOLOCH_UNLOCK(iRequest);
 }
 /******************************************************************************/
-void wise_plugin_exit()
+LOCAL void wise_plugin_exit()
 {
     MOLOCH_LOCK(item);
-    int h;
-    WiseItem_t *wi;
-    for (h = 0; h < INTEL_TYPE_SIZE; h++) {
-        while (DLL_POP_TAIL(wil_, &itemList[h], wi)) {
-            wise_free_item_unlocked(wi);
+    for (int type = 0; type < INTEL_TYPE_SIZE; type++) {
+        WiseItem_t *wi;
+        while (DLL_POP_TAIL(wil_, &types[type].itemList, wi)) {
+            wise_remove_item_locked(wi);
         }
     }
+
+    if (wiseHost)
+        g_free(wiseHost);
+
+    if (wiseURL)
+        g_free(wiseURL);
 
     moloch_http_free_server(wiseService);
     MOLOCH_UNLOCK(item);
 }
 /******************************************************************************/
-uint32_t wise_plugin_outstanding()
+LOCAL uint32_t wise_plugin_outstanding()
 {
     int count;
     MOLOCH_LOCK(iRequest);
@@ -617,8 +765,112 @@ uint32_t wise_plugin_outstanding()
     return count;
 }
 /******************************************************************************/
+LOCAL void wise_load_config()
+{
+    gsize keys_len;
+    int   i, type;
+    char *wiseStrings[INTEL_TYPE_NUM_PRE] = {"ip", "domain", "md5", "email", "url", "tuple", "ja3", "sha256"};
+
+    for (type = 0; type < INTEL_TYPE_NUM_PRE; type++) {
+        types[type].name = wiseStrings[type];
+        types[type].nameLen = strlen(wiseStrings[type]);
+    }
+
+    // Defaults unless replaced below
+    types[INTEL_TYPE_IP].fields[0] = moloch_field_by_db("http.xffIp");
+    types[INTEL_TYPE_IP].fieldsLen = 1;
+
+    types[INTEL_TYPE_URL].fields[0] = moloch_field_by_db("http.uri");
+    types[INTEL_TYPE_URL].fieldsLen = 1;
+
+    types[INTEL_TYPE_DOMAIN].fields[0] = moloch_field_by_db("http.host");
+    types[INTEL_TYPE_DOMAIN].fields[1] = moloch_field_by_db("dns.host");
+
+    if (config.parseDNSRecordAll) {
+        types[INTEL_TYPE_DOMAIN].fields[2] = moloch_field_by_db("dns.mailserverHost");
+        // Not sending nameserver for now
+        types[INTEL_TYPE_DOMAIN].fieldsLen = 3;
+    } else {
+        types[INTEL_TYPE_DOMAIN].fieldsLen = 2;
+    }
+
+    types[INTEL_TYPE_MD5].fields[0] = moloch_field_by_db("http.md5");
+    types[INTEL_TYPE_MD5].fields[1] = moloch_field_by_db("email.md5");
+    types[INTEL_TYPE_MD5].fieldsLen = 2;
+
+    if (config.supportSha256) {
+        types[INTEL_TYPE_SHA256].fields[0] = moloch_field_by_db("http.sha256");
+        types[INTEL_TYPE_SHA256].fields[1] = moloch_field_by_db("email.sha256");
+        types[INTEL_TYPE_SHA256].fieldsLen = 2;
+    }
+
+    types[INTEL_TYPE_EMAIL].fields[0] = moloch_field_by_db("email.src");
+    types[INTEL_TYPE_EMAIL].fields[1] = moloch_field_by_db("email.dst");
+    types[INTEL_TYPE_EMAIL].fieldsLen = 2;
+
+    types[INTEL_TYPE_JA3].fields[0] = moloch_field_by_db("tls.ja3");
+    types[INTEL_TYPE_JA3].fieldsLen = 1;
+
+    // Load user config
+    gchar **keys = moloch_config_section_keys(NULL, "wise-types", &keys_len);
+
+    if (!keys)
+        return;
+
+    for (i = 0; i < (int)keys_len; i++) {
+        gchar **values = moloch_config_section_str_list(NULL, "wise-types", keys[i], NULL);
+
+        if (strcmp(keys[i], "ip") == 0)
+            type = INTEL_TYPE_IP;
+        else if (strcmp(keys[i], "url") == 0)
+            type = INTEL_TYPE_URL;
+        else if (strcmp(keys[i], "domain") == 0)
+            type = INTEL_TYPE_DOMAIN;
+        else if (strcmp(keys[i], "md5") == 0)
+            type = INTEL_TYPE_MD5;
+        else if (strcmp(keys[i], "sha256") == 0)
+            type = INTEL_TYPE_SHA256;
+        else if (strcmp(keys[i], "email") == 0)
+            type = INTEL_TYPE_EMAIL;
+        else if (strcmp(keys[i], "ja3") == 0)
+            type = INTEL_TYPE_JA3;
+        else {
+            if (numTypes == INTEL_TYPE_SIZE) {
+                LOGEXIT("Too many wise-types, can only have %d custom types", INTEL_TYPE_SIZE - INTEL_TYPE_NUM_PRE);
+            }
+            type = numTypes++;
+            types[type].nameLen = strlen(keys[i]);
+            types[type].name = g_ascii_strdown(keys[i], types[type].nameLen);
+
+            if (types[type].nameLen > 12)
+                LOGEXIT("wise-types '%s' too long, max 12 chars", keys[i]);
+        }
+
+        types[type].fieldsLen = 0;
+        int v;
+        for (v = 0; values[v]; v++) {
+            if (types[type].fieldsLen == INTEL_TYPE_MAX_FIELDS)
+                LOGEXIT("wise-types '%s' has too man fields, max %d", keys[i], INTEL_TYPE_MAX_FIELDS);
+
+            int pos;
+            if (strncmp("db:", values[v], 3) == 0)
+                pos = moloch_field_by_db(values[v] + 3);
+            else
+                pos = moloch_field_by_exp(values[v]);
+            types[type].fields[(int)types[type].fieldsLen] = pos;
+            types[type].fieldsLen++;
+        }
+        g_strfreev(values);
+    }
+
+    g_strfreev(keys);
+}
+
+
+/******************************************************************************/
 void moloch_plugin_init()
 {
+    int i;
 
     if (config.dryRun) {
         LOG("Not enabling in dryRun mode");
@@ -631,25 +883,33 @@ void moloch_plugin_init()
     cacheSecs = moloch_config_int(NULL, "wiseCacheSecs", 600, 1, 5000);
     tcpTuple = moloch_config_boolean(NULL, "wiseTcpTupleLookups", FALSE);
     udpTuple = moloch_config_boolean(NULL, "wiseUdpTupleLookups", FALSE);
+    logEvery = moloch_config_int(NULL, "wiseLogEvery", 10000, 0, 10000000);
 
-    int   port = moloch_config_int(NULL, "wisePort", 8081, 1, 0xffff);
-    char *host = moloch_config_str(NULL, "wiseHost", "127.0.0.1");
+    wiseURL  = moloch_config_str(NULL, "wiseURL", NULL);
+    wisePort = moloch_config_int(NULL, "wisePort", 8081, 1, 0xffff);
+    wiseHost = moloch_config_str(NULL, "wiseHost", "127.0.0.1");
 
-    httpHostField  = moloch_field_by_db("ho");
-    httpXffField   = moloch_field_by_db("xff");
-    httpMd5Field   = moloch_field_by_db("hmd5");
-    emailMd5Field  = moloch_field_by_db("emd5");
-    emailSrcField  = moloch_field_by_db("esrc");
-    emailDstField  = moloch_field_by_db("edst");
-    dnsHostField   = moloch_field_by_db("dnsho");
-    tagsField      = moloch_field_by_db("ta");
-    httpUrlField   = moloch_field_by_db("us");
-    protocolField  = moloch_field_by_db("prot-term");
+    protocolField    = moloch_field_by_db("protocol");
 
-    char hoststr[200];
-    snprintf(hoststr, sizeof(hoststr), "http://%s:%d", host, port);
-    wiseService = moloch_http_create_server(hoststr, maxConns, maxRequests, 0);
-    g_free(host);
+    wise_load_config();
+
+    wiseExcludeDomains = moloch_config_str_list(NULL, "wiseExcludeDomains", ".in-addr.arpa;.ip6.arpa");
+    for (i = 0; wiseExcludeDomains[i]; i++);
+    wiseExcludeDomainsNum = i;
+    wiseExcludeDomainsLen = malloc(sizeof(int) * wiseExcludeDomainsNum);
+
+    for (i = 0; wiseExcludeDomains[i]; i++) {
+        wiseExcludeDomainsLen[i] = strlen(wiseExcludeDomains[i]);
+    }
+
+    if (wiseURL) {
+        wiseService = moloch_http_create_server(wiseURL, maxConns, maxRequests, 0);
+    } else {
+        char hoststr[200];
+        snprintf(hoststr, sizeof(hoststr), "http://%s:%d", wiseHost, wisePort);
+        wiseService = moloch_http_create_server(hoststr, maxConns, maxRequests, 0);
+    }
+    moloch_http_set_retries(wiseService, 1);
 
     moloch_plugins_register("wise", FALSE);
 
@@ -666,11 +926,13 @@ void moloch_plugin_init()
 
     moloch_plugins_set_outstanding_cb("wise", wise_plugin_outstanding);
 
-    int h;
-    for (h = 0; h < INTEL_TYPE_SIZE; h++) {
-        HASH_INIT(wih_, itemHash[h], moloch_string_hash, wise_item_cmp);
-        DLL_INIT(wil_, &itemList[h]);
+    int type;
+    for (type = 0; type < INTEL_TYPE_SIZE; type++) {
+        HASH_INIT(wih_, types[type].itemHash, moloch_string_hash, wise_item_cmp);
+        DLL_INIT(wil_, &types[type].itemList);
     }
     g_timeout_add_seconds(1, wise_flush, 0);
     wise_load_fields();
+
+    sprintf(wiseGetURI, "/get?ver=2");
 }

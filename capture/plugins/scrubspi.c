@@ -31,7 +31,7 @@ LOCAL SS_t               ss[MAX_SS];
 
 
 /******************************************************************************/
-void scrubspi_plugin_save(MolochSession_t *session, int UNUSED(final))
+LOCAL void scrubspi_plugin_save(MolochSession_t *session, int UNUSED(final))
 {
     int                    s;
     guint                  i;
@@ -73,11 +73,28 @@ void scrubspi_plugin_save(MolochSession_t *session, int UNUSED(final))
             );
 
             break;
+        case MOLOCH_FIELD_TYPE_STR_GHASH:
+        {
+            GHashTableIter iter;
+            GHashTable    *ghash = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, NULL);
+            gpointer       ikey;
+
+            g_hash_table_iter_init (&iter, session->fields[pos]->ghash);
+            while (g_hash_table_iter_next (&iter, &ikey, NULL)) {
+                newstr = g_regex_replace(ss[s].search, ikey, -1, 0, ss[s].replace, 0, NULL);
+                if (!newstr)
+                    newstr = g_strdup(ikey);
+                g_hash_table_add(ghash, newstr);
+            }
+            g_hash_table_destroy(session->fields[pos]->ghash);
+            session->fields[pos]->ghash = ghash;
+            break;
         }
+        } /* switch */
     }
 }
 /******************************************************************************/
-void scrubspi_add_entry(char *key, char *value)
+LOCAL void scrubspi_add_entry(char *key, char *value)
 {
     char spliton[2] = {0, 0};
     spliton[0] = value[0];
@@ -103,15 +120,17 @@ void scrubspi_add_entry(char *key, char *value)
         MolochFieldInfo_t *field = config.fields[pos];
         if (field->type != MOLOCH_FIELD_TYPE_STR &&
             field->type != MOLOCH_FIELD_TYPE_STR_ARRAY &&
-            field->type != MOLOCH_FIELD_TYPE_STR_HASH) {
+            field->type != MOLOCH_FIELD_TYPE_STR_HASH &&
+            field->type != MOLOCH_FIELD_TYPE_STR_GHASH) {
             LOGEXIT("Field %s in [scrubspi] is not of type string", keys[j]);
         }
         ss[ssLen].pos     = pos;
         ss[ssLen].search  = search;
-        ss[ssLen].replace = values[1];
+        ss[ssLen].replace = g_strdup(values[1]);
         ssLen++;
     }
     g_strfreev(keys);
+    g_strfreev(values);
 }
 /******************************************************************************/
 void moloch_plugin_init()
@@ -145,6 +164,7 @@ void moloch_plugin_init()
             LOGEXIT("No value for %s in section [scrubspi]", keys[i]);
 
         scrubspi_add_entry(keys[i], value);
+        g_free(value);
     }
     g_strfreev(keys);
 #else

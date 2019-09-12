@@ -25,144 +25,60 @@
 
 /******************************************************************************/
 extern MolochConfig_t        config;
-static gchar                 classTag[100];
+LOCAL  gchar                 classTag[100];
 
-static magic_t               cookie[MOLOCH_MAX_PACKET_THREADS];
+LOCAL  magic_t               cookie[MOLOCH_MAX_PACKET_THREADS];
 
 extern unsigned char         moloch_char_to_hexstr[256][3];
 
 int    userField;
 
-enum MolochMagicMode { MOLOCH_MAGICMODE_LIBMAGIC, MOLOCH_MAGICMODE_MOLOCHMAGIC, MOLOCH_MAGICMODE_BASIC, MOLOCH_MAGICMODE_NONE};
+enum MolochMagicMode { MOLOCH_MAGICMODE_LIBMAGIC, MOLOCH_MAGICMODE_BOTH, MOLOCH_MAGICMODE_BASIC, MOLOCH_MAGICMODE_NONE};
 
 LOCAL enum MolochMagicMode magicMode;
-/*############################## molochmagic ##############################*/
-
-typedef struct {
-    uint8_t *match;
-    char    *mime;
-    short    matchlen;
-    short    mimelen;
-    uint8_t  ignoreCase;
-} MolochMagic_t;
-
-#define MOLOCH_MAGIC_MAX_SEARCH 100
-#define MOLOCH_MAGIC_MAX_OFFSET 15
-
-LOCAL MolochMagic_t magicSearch[MOLOCH_MAGIC_MAX_SEARCH];
-LOCAL int           magicSearchLen;
-
-typedef struct {
-    MolochMagic_t **magic;
-    uint8_t         num;
-    uint8_t         size;
-} MolochMagicList_t;
-LOCAL MolochMagicList_t magicMatch[MOLOCH_MAGIC_MAX_OFFSET][256][256];
-
-int magicOffset[MOLOCH_MAGIC_MAX_OFFSET];
-int magicOffsetNum;
 
 /******************************************************************************/
-void moloch_parsers_molochmagic_add_list(MolochMagicList_t *list, MolochMagic_t *magic)
-{
-    if (list->size == 0) {
-        list->size = 3;
-        list->magic = malloc(list->size * sizeof(MolochMagic_t *));
-    } else if (list->size == list->num) {
-        list->size *= 1.5;
-        list->magic = realloc(list->magic, list->size * sizeof(MolochMagic_t *));
-    }
+#define MAGIC_MATCH(offset, needle) memcmp(data+offset, needle, sizeof(needle)-1) == 0
+#define MAGIC_MATCH_LEN(offset, needle) ((len > (int)sizeof(needle)-1+offset) && (memcmp(data+offset, needle, sizeof(needle)-1) == 0))
 
-    list->magic[list->num] = magic;
-    list->num++;
-}
-/******************************************************************************/
-void moloch_parsers_molochmagic_add(int offset, uint8_t *match, int matchlen, char *mime, int ignoreCase)
-{
-    int offsetPos;
-    for (offsetPos = 0; offsetPos < magicOffsetNum; offsetPos++) {
-        if (magicOffset[offsetPos] == offset) {
-            break;
-        }
-    }
+#define MAGIC_MEMSTR(offset, needle) moloch_memstr(data+offset, len-offset, needle, sizeof(needle)-1)
+#define MAGIC_MEMSTR_LEN(offset, needle) ((len > (int)sizeof(needle)-1+offset) && (moloch_memstr(data+offset, len-offset, needle, sizeof(needle)-1)))
 
-    if (offsetPos == MOLOCH_MAGIC_MAX_OFFSET) {
-        LOG("Too many offsets, can't add %d %s", offset, mime);
-        return;
-    }
+#define MAGIC_STRCASE(offset, needle) strncasecmp(data+offset, needle, sizeof(needle)-1) == 0
+#define MAGIC_STRCASE_LEN(offset, needle) ((len > (int)sizeof(needle)-1+offset) && (strncasecmp(data+offset, needle, sizeof(needle)-1) == 0))
 
-    if (offsetPos == magicOffsetNum) {
-        magicOffset[magicOffsetNum] = offset;
-        magicOffsetNum++;
-    }
-
-
-    MolochMagic_t *magic = MOLOCH_TYPE_ALLOC(MolochMagic_t);
-
-    magic->match = match;
-    magic->matchlen = matchlen;
-    magic->mime = mime;
-    magic->mimelen = strlen(mime);
-    magicSearch[magicSearchLen].ignoreCase = ignoreCase;
-
-    if (ignoreCase) {
-        moloch_parsers_molochmagic_add_list(&magicMatch[offsetPos][tolower(match[0])][tolower(match[1])], magic);
-        moloch_parsers_molochmagic_add_list(&magicMatch[offsetPos][tolower(match[0])][toupper(match[1])], magic);
-        moloch_parsers_molochmagic_add_list(&magicMatch[offsetPos][toupper(match[0])][tolower(match[1])], magic);
-        moloch_parsers_molochmagic_add_list(&magicMatch[offsetPos][toupper(match[0])][toupper(match[1])], magic);
-    } else {
-        moloch_parsers_molochmagic_add_list(&magicMatch[offsetPos][match[0]][match[1]], magic);
-    }
-}
-
-/******************************************************************************/
-void moloch_parsers_molochmagic_add_search(uint8_t *match, int matchlen, char *mime, int ignoreCase)
-{
-    if (magicSearchLen >= MOLOCH_MAGIC_MAX_SEARCH) {
-        LOG("Too many searches, can't add %s", mime);
-        return;
-    }
-    magicSearch[magicSearchLen].match = match;
-    magicSearch[magicSearchLen].matchlen = matchlen;
-    magicSearch[magicSearchLen].mime = mime;
-    magicSearch[magicSearchLen].mimelen = strlen(mime);
-    magicSearch[magicSearchLen].ignoreCase = ignoreCase;
-
-    magicSearchLen++;
-}
-
-/******************************************************************************/
+#define MAGIC_RESULT(str) moloch_field_string_add(field, session, str, sizeof(str)-1, TRUE), str
 const char *moloch_parsers_magic_basic(MolochSession_t *session, int field, const char *data, int len)
 {
     switch (data[0]) {
     case 0:
-        if (len > 10 && memcmp(data+4, "ftyp", 4) == 0) {
-            if (memcmp(data+8, "qt", 2) == 0) {
-                return moloch_field_string_add(field, session, "video/quicktime", 15, TRUE);
+        if (len > 10 && MAGIC_MATCH(4, "ftyp")) {
+            if (MAGIC_MATCH(8, "qt")) {
+                return MAGIC_RESULT("video/quicktime");
             }
-            if (memcmp(data+8, "3g", 2) == 0) {
-                return moloch_field_string_add(field, session, "video/3gpp", 10, TRUE);
+            if (MAGIC_MATCH(8, "3g")) {
+                return MAGIC_RESULT("video/3gpp");
             }
-        } else if (memcmp(data, "\000\001\000\000\000", 5) == 0) {
-            return moloch_field_string_add(field, session, "application/x-font-ttf", 22, TRUE);
+        } else if (MAGIC_MATCH(0, "\000\001\000\000\000")) {
+            return MAGIC_RESULT("application/x-font-ttf");
         }
         break;
     case '\032':
-        if (memcmp(data, "\x1a\x45\xdf\xa3", 4) == 0) {
-            if (moloch_memstr(data+4, len-4, "webm", 4)) {
-                return moloch_field_string_add(field, session, "video/webm", 10, TRUE);
+        if (MAGIC_MATCH(0, "\x1a\x45\xdf\xa3")) {
+            if (MAGIC_MEMSTR_LEN(4, "webm")) {
+                return MAGIC_RESULT("video/webm");
             }
-            if (moloch_memstr(data+4, len-4, "matroska", 8)) {
-                return moloch_field_string_add(field, session, "video/x-matroska", 16, TRUE);
+            if (MAGIC_MEMSTR_LEN(4, "matroska")) {
+                return MAGIC_RESULT("video/x-matroska");
             }
         }
         break;
     case '\037':
         if (data[1] == '\213') {
-            return moloch_field_string_add(field, session, "application/x-gzip", 18, TRUE);
+            return MAGIC_RESULT("application/x-gzip");
         }
         if (data[1] == '\235') {
-            return moloch_field_string_add(field, session, "application/x-compress", 22, TRUE);
+            return MAGIC_RESULT("application/x-compress");
         }
         break;
 #ifdef OID_DECODE_SOMEDAY
@@ -184,7 +100,7 @@ const char *moloch_parsers_magic_basic(MolochSession_t *session, int field, cons
                     moloch_parsers_asn_decode_oid(oid, sizeof(oid), ivalue, ilen);
                     printf("%s ", oid);
                     moloch_print_hex_string(ivalue, ilen);
-                    if (ilen == 9 && memcmp(ivalue, "\x2a\x86\x48\x86\xf7\x0d\x01\x01\x05", 9) == 0) {
+                    if (ilen == 9 && MAGIC_MATCH(ivalue, "\x2a\x86\x48\x86\xf7\x0d\x01\x01\x05")) {
                     }
                 }
             }
@@ -193,234 +109,229 @@ const char *moloch_parsers_magic_basic(MolochSession_t *session, int field, cons
 #endif
     case '#':
         if (data[1] == '!') {
-            return moloch_field_string_add(field, session, "text/x-shellscript", 18, TRUE);
+            if (MAGIC_MEMSTR_LEN(3, "node")) {
+                return MAGIC_RESULT("application/javascript");
+            } else if (MAGIC_MEMSTR_LEN(3, "perl")) {
+                return MAGIC_RESULT("text/x-perl");
+            } else if (MAGIC_MEMSTR_LEN(3, "ruby")) {
+                return MAGIC_RESULT("text/x-ruby");
+            } else if (MAGIC_MEMSTR_LEN(3, "python")) {
+                return MAGIC_RESULT("text/x-python");
+            }
+            return MAGIC_RESULT("text/x-shellscript");
         }
         break;
     case '%':
-        if (memcmp(data, "%PDF-", 5) == 0) {
-            return moloch_field_string_add(field, session, "application/pdf", 15, TRUE);
+        if (MAGIC_MATCH(0, "%PDF-")) {
+            return MAGIC_RESULT("application/pdf");
         }
         break;
     case '<':
         switch(data[1]) {
         case '!':
-            if (len > 14 && strncasecmp(data, "<!doctype html", 14) == 0) {
-                return moloch_field_string_add(field, session, "text/html", 9, TRUE);
+            if (MAGIC_STRCASE_LEN(0, "<!doctype html")) {
+                return MAGIC_RESULT("text/html");
+            }
+            if (MAGIC_STRCASE_LEN(0, "<!doctype svg")) {
+                return MAGIC_RESULT("text/svg+xml");
             }
             break;
         case '?':
-            if (strncasecmp(data, "<?xml", 5) == 0) {
-                if (moloch_memstr(data+5, len-5, "<svg", 4)) {
-                    return moloch_field_string_add(field, session, "image/svg+xml", 13, TRUE);
+            if (MAGIC_STRCASE(0, "<?xml")) {
+                if (MAGIC_MEMSTR_LEN(5, "<svg")) {
+                    return MAGIC_RESULT("image/svg+xml");
                 }
-                return moloch_field_string_add(field, session, "text/xml", 8, TRUE);
+                return MAGIC_RESULT("text/xml");
+            }
+            if (MAGIC_STRCASE_LEN(2, "php") || MAGIC_STRCASE_LEN(2, " php")) {
+                return MAGIC_RESULT("text/x-php");
             }
             break;
         case 'B':
         case 'b':
-            if (strncasecmp(data, "<body", 5) == 0) {
-                return moloch_field_string_add(field, session, "text/html", 9, TRUE);
+            if (MAGIC_STRCASE(0, "<body")) {
+                return MAGIC_RESULT("text/html");
             }
             break;
         case 'H':
         case 'h':
-            if (strncasecmp(data, "<head", 5) == 0) {
-                return moloch_field_string_add(field, session, "text/html", 9, TRUE);
+            if (MAGIC_STRCASE(0, "<head")) {
+                return MAGIC_RESULT("text/html");
             }
-            if (strncasecmp(data, "<html", 5) == 0) {
-                return moloch_field_string_add(field, session, "text/html", 9, TRUE);
+            if (MAGIC_STRCASE(0, "<html")) {
+                return MAGIC_RESULT("text/html");
             }
             break;
         case 's':
         case 'S':
-            if (strncasecmp(data, "<svg", 4) == 0) {
-                return moloch_field_string_add(field, session, "image/svg", 9, TRUE);
+            if (MAGIC_STRCASE(0, "<svg")) {
+                return MAGIC_RESULT("image/svg");
             }
             break;
         }
         break;
     case '{':
         if (data[1] == '"' && isalpha(data[2])) {
-            return moloch_field_string_add(field, session, "application/json", 16, TRUE);
+            return MAGIC_RESULT("application/json");
         }
         break;
     case '8':
-        if (memcmp(data, "8BPS", 4) == 0) {
-            return moloch_field_string_add(field, session, "image/vnd.adobe.photoshop", 25, TRUE);
+        if (MAGIC_MATCH(0, "8BPS")) {
+            return MAGIC_RESULT("image/vnd.adobe.photoshop");
         }
         break;
     case 'B':
         if (data[1] == 'M') {
-            return moloch_field_string_add(field, session, "application/x-ms-bmp", 20, TRUE);
+            return MAGIC_RESULT("application/x-ms-bmp");
         }
 
-        if (memcmp(data, "BZh", 3) == 0) {
-            return moloch_field_string_add(field, session, "application/x-bzip2", 19, TRUE);
+        if (MAGIC_MATCH(0, "BZh")) {
+            return MAGIC_RESULT("application/x-bzip2");
         }
         break;
     case 'C':
-        if (memcmp(data, "CWS", 3) == 0) {
-            return moloch_field_string_add(field, session, "application/x-shockwave-flash", 29, TRUE);
+        if (MAGIC_MATCH(0, "CWS")) {
+            return MAGIC_RESULT("application/x-shockwave-flash");
         }
         break;
     case 'F':
-        if (memcmp(data, "FLV\001", 4) == 0) {
-            return moloch_field_string_add(field, session, "video/x-flv", 11, TRUE);
+        if (MAGIC_MATCH(0, "FLV\001")) {
+            return MAGIC_RESULT("video/x-flv");
         }
         break;
     case 'G':
-        if (memcmp(data, "GIF8", 4) == 0) {
-            return moloch_field_string_add(field, session, "image/gif", 9, TRUE);
+        if (MAGIC_MATCH(0, "GIF8")) {
+            return MAGIC_RESULT("image/gif");
+        }
+        break;
+    case 'i':
+        if (MAGIC_MATCH(0, "icns")) {
+            return MAGIC_RESULT("image/x-icns");
         }
         break;
     case 'I':
-        if (memcmp(data, "ID3", 3) == 0) {
-            return moloch_field_string_add(field, session, "audio/mpeg", 10, TRUE);
+        if (MAGIC_MATCH(0, "ID3")) {
+            return MAGIC_RESULT("audio/mpeg");
         }
         break;
     case 'M':
         if (data[1] == 'Z') {
-            return moloch_field_string_add(field, session, "application/x-dosexec", 21, TRUE);
+            return MAGIC_RESULT("application/x-dosexec");
         }
-        if (memcmp(data, "MSCF\000\000", 6) == 0) {
-            return moloch_field_string_add(field, session, "application/vnd.ms-cab-compressed", 33, TRUE);
+        if (MAGIC_MATCH_LEN(0, "MSCF\000\000")) {
+            return MAGIC_RESULT("application/vnd.ms-cab-compressed");
         }
         break;
     case 'O':
-        if (len > 40 && memcmp(data, "OggS", 4) == 0) {
+        if (len > 40 && MAGIC_MATCH(0, "OggS")) {
             // https://speex.org/docs/manual/speex-manual/node8.html
-            if (memcmp(data+28, "Speex   ", 8) == 0) {
-                return moloch_field_string_add(field, session, "audio/ogg", 9, TRUE);
+            if (MAGIC_MATCH(28, "Speex   ")) {
+                return MAGIC_RESULT("audio/ogg");
             }
 
             // https://xiph.org/flac/ogg_mapping.html
-            if (memcmp(data+29, "FLAC", 4) == 0) {
-                return moloch_field_string_add(field, session, "audio/ogg", 9, TRUE);
+            if (MAGIC_MATCH(29, "FLAC")) {
+                return MAGIC_RESULT("audio/ogg");
             }
 
             // https://xiph.org/vorbis/doc/Vorbis_I_spec.html
-            if (memcmp(data+28, "\001vorbis", 7) == 0) {
-                return moloch_field_string_add(field, session, "audio/ogg", 9, TRUE);
+            if (MAGIC_MATCH(28, "\001vorbis")) {
+                return MAGIC_RESULT("audio/ogg");
             }
 
             // https://www.theora.org/doc/Theora.pdf
-            if (memcmp(data+28, "\x80theora", 7) == 0) {
-                return moloch_field_string_add(field, session, "video/ogg", 9, TRUE);
+            if (MAGIC_MATCH(28, "\x80theora")) {
+                return MAGIC_RESULT("video/ogg");
             }
-        } else if (memcmp(data, "OTTO", 4) == 0) {
-            return moloch_field_string_add(field, session, "application/vnd.ms-opentype", 27, TRUE);
+        } else if (MAGIC_MATCH(0, "OTTO")) {
+            return MAGIC_RESULT("application/vnd.ms-opentype");
         }
         break;
     case 'P':
-        if (memcmp(data, "PK\003\004", 4) == 0) {
-            return moloch_field_string_add(field, session, "application/zip", 15, TRUE);
+        if (MAGIC_MATCH(0, "PK\003\004")) {
+            return MAGIC_RESULT("application/zip");
         }
-        if (memcmp(data, "PK\005\005", 4) == 0) {
-            return moloch_field_string_add(field, session, "application/zip", 15, TRUE);
+        if (MAGIC_MATCH(0, "PK\005\006")) {
+            return MAGIC_RESULT("application/zip");
+        }
+        if (MAGIC_MATCH_LEN(0, "PK\007\008PK")) {
+            return MAGIC_RESULT("application/zip");
         }
         break;
     case 'R':
-        if (memcmp(data, "RIFF", 4) == 0) {
-            return moloch_field_string_add(field, session, "audio/x-wav", 11, TRUE);
+        if (MAGIC_MATCH(0, "RIFF")) {
+            return MAGIC_RESULT("audio/x-wav");
         }
-        if (memcmp(data, "Rar!\x1a", 5) == 0) {
-            return moloch_field_string_add(field, session, "application/x-rar", 17, TRUE);
+        if (MAGIC_MATCH(0, "Rar!\x1a")) {
+            return MAGIC_RESULT("application/x-rar");
         }
         break;
     case 'W':
-        if (memcmp(data, "WAVE", 4) == 0) {
-            return moloch_field_string_add(field, session, "audio/x-wav", 11, TRUE);
+        if (MAGIC_MATCH(0, "WAVE")) {
+            return MAGIC_RESULT("audio/x-wav");
         }
         break;
     case 'd':
-        if (len > 20 && memcmp(data, "d8:announce", 11) == 0) {
-            return moloch_field_string_add(field, session, "application/x-bittorrent", 24, TRUE);
+        if (MAGIC_MATCH_LEN(0, "d8:announce")) {
+            return MAGIC_RESULT("application/x-bittorrent");
         }
         break;
     case 'w':
-        if (memcmp(data, "wOFF", 4) == 0) {
-            return moloch_field_string_add(field, session, "application/font-woff", 21, TRUE);
+        if (MAGIC_MATCH(0, "wOFF")) {
+            return MAGIC_RESULT("application/font-woff");
+        }
+        if (MAGIC_MATCH(0, "wOF2")) {
+            return MAGIC_RESULT("application/font-woff2");
         }
         break;
     case '\x89':
-        if (memcmp(data, "\x89PNG", 4) == 0) {
-            return moloch_field_string_add(field, session, "image/png", 9, TRUE);
+        if (MAGIC_MATCH(0, "\x89PNG")) {
+            return MAGIC_RESULT("image/png");
         }
         break;
     case '\375':
-        if (memcmp(data, "\3757zXZ", 5) == 0) {
-            return moloch_field_string_add(field, session, "application/x-xz", 16, TRUE);
+        if (MAGIC_MATCH_LEN(0, "\3757zXZ")) {
+            return MAGIC_RESULT("application/x-xz");
         }
         break;
     case '\377':
-        if (len > 10 && memcmp(data, "\377\330\377", 3) == 0) {
-            return moloch_field_string_add(field, session, "image/jpeg", 10, TRUE);
+        if (len > 10 && MAGIC_MATCH(0, "\377\330\377")) {
+            return MAGIC_RESULT("image/jpeg");
+        }
+        break;
+    case '\xed':
+        if (len > 10 && MAGIC_MATCH(0, "\xed\xab\xee\xdb")) {
+            return MAGIC_RESULT("application/x-rpm");
         }
         break;
     } /* switch */
 
-    if (len > 257+5 && memcmp(data+257, "ustar", 5) == 0) {
-        return moloch_field_string_add(field, session, "application/x-tar", 17, TRUE);
+    if (MAGIC_MATCH_LEN(257, "ustar")) {
+        return MAGIC_RESULT("application/x-tar");
     }
-    if (moloch_memstr(data, len, "document.write", 14) ||
-        moloch_memstr(data, len, "'use strict'", 12)) {
-        return moloch_field_string_add(field, session, "text/javascript", 15, TRUE);
+    if (MAGIC_MEMSTR_LEN(0, "document.write") ||
+        MAGIC_MEMSTR_LEN(0, "'use strict'")) {
+        return MAGIC_RESULT("text/javascript");
     }
-    return NULL;
-}
-/******************************************************************************/
-const char *moloch_parsers_magic_molochmagic(MolochSession_t *session, int field, const char *data, int len)
-{
-    int i, offset, offsetPos;
-    uint8_t *udata = (uint8_t *)data;
-    for (offsetPos = 0; offsetPos < magicOffsetNum; offsetPos++) {
-        offset = magicOffset[offsetPos];
-
-        if (offset + 1 >= len)
-            continue;
-
-        //LOG("offset: %d len: %d udata: %.*s %02x %02x", offset, len, len-offset, udata+offset, udata[offset], udata[offset+1]);
-
-        MolochMagicList_t *list = &magicMatch[offsetPos][(int)(udata[offset])][(int)(udata[offset+1])];
-
-        for (i = 0; i < list->num; i++) {
-            //LOG("offset: %d i: %d len: %d matchlen: %d", offset, i, len, list->magic[i]->matchlen);
-            if (len <= list->magic[i]->matchlen + offset)
-                continue;
-            if (list->magic[i]->ignoreCase) {
-                if (strncasecmp((const char *)udata+offset, (const char *)list->magic[i]->match, list->magic[i]->matchlen) == 0) {
-                    return moloch_field_string_add(field, session, list->magic[i]->mime, list->magic[i]->mimelen, TRUE);
-                }
-            } else {
-                if (memcmp(udata+offset, list->magic[i]->match, list->magic[i]->matchlen) == 0) {
-                    return moloch_field_string_add(field, session, list->magic[i]->mime, list->magic[i]->mimelen, TRUE);
-                }
-            }
-        }
-    }
-
-    for (i = 0; i < magicSearchLen; i++) {
-        if (magicSearch[i].ignoreCase) {
-            if (moloch_memcasestr(data, len, (const char*)magicSearch[i].match, magicSearch[i].matchlen)) {
-                return moloch_field_string_add(field, session, magicSearch[i].mime, magicSearch[i].mimelen, TRUE);
-            }
-        } else {
-            if (moloch_memstr(data, len, (const char*)magicSearch[i].match, magicSearch[i].matchlen)) {
-                return moloch_field_string_add(field, session, magicSearch[i].mime, magicSearch[i].mimelen, TRUE);
-            }
-        }
-    }
-
     return NULL;
 }
 /******************************************************************************/
 const char *moloch_parsers_magic(MolochSession_t *session, int field, const char *data, int len)
 {
     const char *m;
-    if (len < 5 || magicMode == MOLOCH_MAGICMODE_NONE)
+    if (len < 5)
         return NULL;
 
     switch (magicMode) {
+    case MOLOCH_MAGICMODE_BASIC:
+        return moloch_parsers_magic_basic(session, field, data, len);
+
+    case MOLOCH_MAGICMODE_BOTH:
+        m = moloch_parsers_magic_basic(session, field, data, len);
+        if (m)
+            return m;
+
+        // Fall thru
     case MOLOCH_MAGICMODE_LIBMAGIC:
         m = magic_buffer(cookie[session->thread], data, MIN(len,50));
         if (m) {
@@ -434,10 +345,7 @@ const char *moloch_parsers_magic(MolochSession_t *session, int field, const char
             return moloch_field_string_add(field, session, m, len, TRUE);
         }
         return NULL;
-    case MOLOCH_MAGICMODE_BASIC:
-        return moloch_parsers_magic_basic(session, field, data, len);
-    case MOLOCH_MAGICMODE_MOLOCHMAGIC:
-        return moloch_parsers_magic_molochmagic(session, field, data, len);
+    case MOLOCH_MAGICMODE_NONE:
     default:
         return NULL;
     }
@@ -445,12 +353,11 @@ const char *moloch_parsers_magic(MolochSession_t *session, int field, const char
 /******************************************************************************/
 void moloch_parsers_initial_tag(MolochSession_t *session)
 {
-    int i;
-
     if (config.nodeClass)
         moloch_session_add_tag(session, classTag);
 
     if (config.extraTags) {
+        int i;
         for (i = 0; config.extraTags[i]; i++) {
             moloch_session_add_tag(session, config.extraTags[i]);
         }
@@ -465,6 +372,15 @@ void moloch_parsers_initial_tag(MolochSession_t *session)
         break;
     case IPPROTO_ICMP:
         moloch_session_add_protocol(session, "icmp");
+        break;
+    case IPPROTO_ICMPV6:
+        moloch_session_add_protocol(session, "icmp");
+        break;
+    case IPPROTO_SCTP:
+        moloch_session_add_protocol(session, "sctp");
+        break;
+    case IPPROTO_ESP:
+        moloch_session_add_protocol(session, "esp");
         break;
     }
 
@@ -486,6 +402,7 @@ moloch_parsers_asn_get_tlv(BSB *bsb, uint32_t *apc, uint32_t *atag, uint32_t *al
     BSB_IMPORT_u08(*bsb, ch);
 
     *apc = (ch >> 5) & 0x1;
+    *atag = 0;
 
     if ((ch & 0x1f) ==  0x1f) {
         while (BSB_REMAINING(*bsb)) {
@@ -551,7 +468,7 @@ int moloch_parsers_asn_get_sequence(MolochASNSeq_t *seqs, int maxSeq, const unsi
         if (seqs[num].value == 0)
             break;
 #ifdef DEBUG_PARSERS
-        LOG("%d %p %d %d %d %d", num, seqs[num].value, seqs[num].pc, seqs[num].tag, seqs[num].len, BSB_IS_ERROR(bsb));
+        LOG("%d %p %u %u %u %u", num, seqs[num].value, seqs[num].pc, seqs[num].tag, seqs[num].len, BSB_IS_ERROR(bsb));
 #endif
         num++;
     }
@@ -601,39 +518,122 @@ void moloch_parsers_asn_decode_oid(char *buf, int bufsz, unsigned char *oid, int
         value = 0;
     }
 }
+/******************************************************************************/
+#define char2num(ch) (isdigit(ch)?((ch) - '0'):0)
+#define str2num(str) (char2num((str)[0]) * 10 + char2num((str)[1]))
+#define str4num(str) (char2num((str)[0]) * 1000 + char2num((str)[1]) * 100 + char2num((str)[2]) * 10 + char2num((str)[3]))
+uint64_t moloch_parsers_asn_parse_time(MolochSession_t *session, int tag, unsigned char* value, int len)
+{
+    int        offset = 0;
+    int        pos = 0;
+    struct tm  tm;
+    time_t     val;
 
+    //UTCTime
+    if (tag == 23 && len > 12) {
+        if (len > 17 && value[12] != 'Z')
+            offset = str2num(value+13) * 60 + str2num(value+15);
+
+        if (value[12] == '-')
+            offset = -offset;
+
+        tm.tm_year = str2num(value+0);
+        tm.tm_mon  = str2num(value+2) - 1;
+        tm.tm_mday = str2num(value+4);
+        tm.tm_hour = str2num(value+6);
+        tm.tm_min  = str2num(value+8);
+        tm.tm_sec  = str2num(value+10);
+
+        if (tm.tm_year < 50)
+            tm.tm_year += 100;
+
+        val = timegm(&tm) + offset;
+        if (val < 0) {
+            val = 0;
+            moloch_session_add_tag(session, "cert:pre-epoch-time");
+        }
+        return val;
+    }
+    //GeneralizedTime
+    else if (tag == 24 && len >= 10) {
+        memset(&tm, 0, sizeof(tm));
+        tm.tm_year = str4num(value+0) - 1900;
+        tm.tm_mon  = str2num(value+4) - 1;
+        tm.tm_mday = str2num(value+6);
+        tm.tm_hour = str2num(value+8);
+        if (len < 10 || value[10] == 'Z' || value[10] == '+' || value[10] == '-') {
+            pos = 10;
+            goto gtdone;
+        }
+        tm.tm_min  = str2num(value+10);
+        if (len < 12 || value[12] == 'Z' || value[12] == '+' || value[12] == '-') {
+            pos = 12;
+            goto gtdone;
+        }
+        tm.tm_sec  = str2num(value+12);
+        if (len < 14 || value[14] == 'Z' || value[14] == '+' || value[14] == '-') {
+            pos = 14;
+            goto gtdone;
+        }
+        if (value[14] == '.') {
+            pos = 18;
+        } else {
+            pos = 14;
+        }
+    gtdone:
+        if (pos == len) {
+            val = timegm(&tm);
+        } else {
+            if (pos + 5 < len && (value[pos] == '+' || value[pos] == '-')) {
+                offset = str2num(value+pos+1) * 60 +  str2num(value+pos+3);
+
+                if (value[pos] == '-')
+                    offset = -offset;
+            }
+            val = timegm(&tm) + offset;
+        }
+
+        if (val < 0) {
+            val = 0;
+            moloch_session_add_tag(session, "cert:pre-epoch-time");
+        }
+        return val;
+    }
+    return 0;
+}
+/******************************************************************************/
+LOCAL int cstring_cmp(const void *a, const void *b)
+{
+   return strcmp(*(char **)a, *(char **)b);
+}
 /******************************************************************************/
 void moloch_parsers_init()
 {
-    moloch_field_define("general", "lotermfield",
-        "user", "User", "user",
-        "External user set for session",
-        MOLOCH_FIELD_TYPE_STR_HASH,  MOLOCH_FIELD_FLAG_CNT | MOLOCH_FIELD_FLAG_LINKED_SESSIONS,
-        "category", "user",
-        NULL);
+    if (config.nodeClass)
+        snprintf(classTag, sizeof(classTag), "class:%s", config.nodeClass);
 
     moloch_field_define("general", "integer",
-        "session.segments", "Session Segments", "ss",
+        "session.segments", "Session Segments", "segmentCnt",
         "Number of segments in session so far",
         0,  MOLOCH_FIELD_FLAG_FAKE,
-        NULL);
+        (char *)NULL);
 
     moloch_field_define("general", "integer",
-        "session.length", "Session Length", "sl",
+        "session.length", "Session Length", "length",
         "Session Length in milliseconds so far",
         0,  MOLOCH_FIELD_FLAG_FAKE,
-        NULL);
+        (char *)NULL);
 
     userField = moloch_field_define("general", "lotermfield",
         "user", "User", "user",
         "External user set for session",
         MOLOCH_FIELD_TYPE_STR_HASH,  MOLOCH_FIELD_FLAG_CNT | MOLOCH_FIELD_FLAG_LINKED_SESSIONS,
         "category", "user",
-        NULL);
+        (char *)NULL);
 
     int flags = MAGIC_MIME;
 
-    char *strMagicMode = moloch_config_str(NULL, "magicMode", "libmagic");
+    char *strMagicMode = moloch_config_str(NULL, "magicMode", "both");
 
     if (strcmp(strMagicMode, "libmagic") == 0) {
         magicMode = MOLOCH_MAGICMODE_LIBMAGIC;
@@ -641,16 +641,19 @@ void moloch_parsers_init()
         magicMode = MOLOCH_MAGICMODE_LIBMAGIC;
         flags |= MAGIC_NO_CHECK_TEXT;
     } else if (strcmp(strMagicMode, "molochmagic") == 0) {
-        magicMode = MOLOCH_MAGICMODE_MOLOCHMAGIC;
-        void molochmagic_load();
-        molochmagic_load();
+        LOG("WARNING - magicMode of `molochmagic` no longer supported, switching to `both`");
+        magicMode = MOLOCH_MAGICMODE_BOTH;
     } else if (strcmp(strMagicMode, "basic") == 0) {
         magicMode = MOLOCH_MAGICMODE_BASIC;
+    } else if (strcmp(strMagicMode, "both") == 0) {
+        magicMode = MOLOCH_MAGICMODE_BOTH;
     } else if (strcmp(strMagicMode, "none") == 0) {
         magicMode = MOLOCH_MAGICMODE_NONE;
     } else {
         LOGEXIT("Unknown magicMode '%s'", strMagicMode);
     }
+
+    g_free(strMagicMode);
 
 #ifdef MAGIC_NO_CHECK_COMPRESS
     flags |= MAGIC_NO_CHECK_COMPRESS |
@@ -663,7 +666,7 @@ void moloch_parsers_init()
     flags |= MAGIC_NO_CHECK_CDF;
 #endif
 
-    if (magicMode == MOLOCH_MAGICMODE_LIBMAGIC) {
+    if (magicMode == MOLOCH_MAGICMODE_LIBMAGIC || magicMode == MOLOCH_MAGICMODE_BOTH) {
         int t;
         for (t = 0; t < config.packetThreads; t++) {
             cookie[t] = magic_open(flags);
@@ -697,13 +700,10 @@ void moloch_parsers_init()
             continue;
 
         const gchar *filename;
-        while (1) {
-            filename = g_dir_read_name(dir);
+        gchar *filenames[100];
+        int    flen = 0;
 
-            // No more files, stop processing this directory
-            if (!filename)
-                break;
-
+        while ((filename = g_dir_read_name(dir))) {
             // Skip hidden files/directories
             if (filename[0] == '.')
                 continue;
@@ -721,31 +721,44 @@ void moloch_parsers_init()
                 continue; /* Already loaded */
             }
 
-            gchar   *path = g_build_filename (config.parsersDir[d], filename, NULL);
+            filenames[flen] = g_strdup(filename);
+            flen++;
+        }
+
+        qsort((void *)filenames, (size_t)flen, sizeof(char *), cstring_cmp);
+
+        int i;
+        for (i = 0; i < flen; i++) {
+            gchar *path = g_build_filename (config.parsersDir[d], filenames[i], NULL);
             GModule *parser = g_module_open (path, 0); /*G_MODULE_BIND_LAZY | G_MODULE_BIND_LOCAL);*/
 
             if (!parser) {
-                LOG("ERROR - Couldn't load parser %s from '%s'\n%s", filename, path, g_module_error());
+                LOG("ERROR - Couldn't load parser %s from '%s'\n%s", filenames[i], path, g_module_error());
                 g_free (path);
                 continue;
             }
-            g_free (path);
 
             MolochPluginInitFunc parser_init;
 
             if (!g_module_symbol(parser, "moloch_parser_init", (gpointer *)(char*)&parser_init) || parser_init == NULL) {
-                LOG("ERROR - Module %s doesn't have a moloch_parser_init", filename);
+                LOG("ERROR - Module %s doesn't have a moloch_parser_init", filenames[i]);
+                g_free(filenames[i]);
                 continue;
             }
+
+            if (config.debug > 1) {
+                LOG("Loaded %s", path);
+            }
+
+            g_free (path);
 
             parser_init();
 
             hstring = MOLOCH_TYPE_ALLOC0(MolochString_t);
-            hstring->str = g_strdup(filename);
-            hstring->len = strlen(filename);
+            hstring->str = filenames[i];
+            hstring->len = strlen(filenames[i]);
             HASH_ADD(s_, loaded, hstring->str, hstring);
         }
-
         g_dir_close(dir);
     }
 
@@ -755,38 +768,31 @@ void moloch_parsers_init()
     );
 
     // Set tags field up AFTER loading plugins
-    config.tagsField = moloch_field_define("general", "termfield",
-        "tags", "Tags", "ta",
+    config.tagsStringField = moloch_field_define("general", "termfield",
+        "tags", "Tags", "tags",
         "Tags set for session",
-        MOLOCH_FIELD_TYPE_INT_GHASH,  MOLOCH_FIELD_FLAG_CNT | MOLOCH_FIELD_FLAG_LINKED_SESSIONS,
-        NULL);
-
-    config.tagsStringField = moloch_field_define("general", "notreal",
-        "tags", "Tags", "tags-term",
-        "Tags set for session",
-        MOLOCH_FIELD_TYPE_STR_HASH,  MOLOCH_FIELD_FLAG_LINKED_SESSIONS | MOLOCH_FIELD_FLAG_NODB,
-        NULL);
+        MOLOCH_FIELD_TYPE_STR_HASH,  MOLOCH_FIELD_FLAG_CNT | MOLOCH_FIELD_FLAG_LINKED_SESSIONS,
+        (char *)NULL);
 
     moloch_field_define("general", "lotermfield",
-        "asset", "Asset", "asset-term",
+        "asset", "Asset", "asset",
         "Asset name",
-        MOLOCH_FIELD_TYPE_STR_HASH,  MOLOCH_FIELD_FLAG_COUNT | MOLOCH_FIELD_FLAG_LINKED_SESSIONS,
-        NULL);
+        MOLOCH_FIELD_TYPE_STR_HASH,  MOLOCH_FIELD_FLAG_CNT | MOLOCH_FIELD_FLAG_LINKED_SESSIONS,
+        (char *)NULL);
 
-    if (config.nodeClass) {
-        snprintf(classTag, sizeof(classTag), "node:%s", config.nodeClass);
-        moloch_db_get_tag(NULL, config.tagsField, classTag, NULL);
-    }
+    gsize keys_len;
+    gchar **keys = moloch_config_section_keys(NULL, "custom-fields", &keys_len);
 
-    if (config.extraTags) {
-        int i;
-        for (i = 0; config.extraTags[i]; i++) {
-            moloch_db_get_tag(NULL, config.tagsField, config.extraTags[i], NULL);
-        }
+    int i;
+    for (i = 0; i < (int)keys_len; i++) {
+        char *value = moloch_config_section_str(NULL, "custom-fields", keys[i], NULL);
+        moloch_field_define_text_full(keys[i], value, NULL);
+        g_free(value);
     }
+    g_strfreev(keys);
+
 
     if (config.extraOps) {
-        int i;
         for (i = 0; config.extraOps[i]; i++) { }
         moloch_field_ops_init(&config.ops, i, 0);
         for (i = 0; config.extraOps[i]; i++) {
@@ -811,7 +817,7 @@ void moloch_parsers_init()
 }
 /******************************************************************************/
 void moloch_parsers_exit() {
-    if (magicMode == MOLOCH_MAGICMODE_LIBMAGIC) {
+    if (magicMode == MOLOCH_MAGICMODE_LIBMAGIC || magicMode == MOLOCH_MAGICMODE_BOTH) {
         int t;
         for (t = 0; t < config.packetThreads; t++) {
             magic_close(cookie[t]);
@@ -851,8 +857,8 @@ void  moloch_parsers_register2(MolochSession_t *session, MolochParserFunc func, 
         } else {
             session->parserLen *= 1.67;
         }
+        session->parserInfo = realloc(session->parserInfo, sizeof(MolochParserInfo_t) * session->parserLen);
     }
-    session->parserInfo = realloc(session->parserInfo, sizeof(MolochParserInfo_t) * session->parserLen);
 
     session->parserInfo[session->parserNum].parserFunc     = func;
     session->parserInfo[session->parserNum].uw             = uw;
@@ -901,14 +907,14 @@ typedef struct
 LOCAL MolochClassifyHead_t classifersTcp0;
 LOCAL MolochClassifyHead_t classifersTcp1[256];
 LOCAL MolochClassifyHead_t classifersTcp2[256][256];
-LOCAL MolochClassifyHead_t classifersTcpPortSrc[0xffff];
-LOCAL MolochClassifyHead_t classifersTcpPortDst[0xffff];
+LOCAL MolochClassifyHead_t classifersTcpPortSrc[0x10000];
+LOCAL MolochClassifyHead_t classifersTcpPortDst[0x10000];
 
 LOCAL MolochClassifyHead_t classifersUdp0;
 LOCAL MolochClassifyHead_t classifersUdp1[256];
 LOCAL MolochClassifyHead_t classifersUdp2[256][256];
-LOCAL MolochClassifyHead_t classifersUdpPortSrc[0xffff];
-LOCAL MolochClassifyHead_t classifersUdpPortDst[0xffff];
+LOCAL MolochClassifyHead_t classifersUdpPortSrc[0x10000];
+LOCAL MolochClassifyHead_t classifersUdpPortDst[0x10000];
 
 /******************************************************************************/
 void moloch_parsers_classifier_add(MolochClassifyHead_t *ch, MolochClassify_t *c)
@@ -917,6 +923,7 @@ void moloch_parsers_classifier_add(MolochClassifyHead_t *ch, MolochClassify_t *c
     for (i = 0; i < ch->cnt; i++) {
         if (ch->arr[i]->offset == c->offset &&
             ch->arr[i]->func == c->func &&
+            c->matchlen == ch->arr[i]->matchlen &&
             strcmp(ch->arr[i]->name, c->name) == 0 &&
             memcmp(ch->arr[i]->match, c->match, c->matchlen) == 0) {
 
@@ -943,14 +950,18 @@ void moloch_parsers_classifier_add(MolochClassifyHead_t *ch, MolochClassify_t *c
 void moloch_parsers_classifier_register_port_internal(const char *name, void *uw, uint16_t port, uint32_t type, MolochClassifyFunc func, size_t sessionsize, int apiversion)
 {
     if (sizeof(MolochSession_t) != sessionsize) {
-        LOGEXIT("Plugin '%s' built with different version of moloch.h\n %lu != %lu", name, sizeof(MolochSession_t),  sessionsize);
+        LOGEXIT("Parser '%s' built with different version of moloch.h\n %u != %u", name, (unsigned int)sizeof(MolochSession_t),  (unsigned int)sessionsize);
     }
 
     if (MOLOCH_API_VERSION != apiversion) {
-        LOGEXIT("Plugin '%s' built with different version of moloch.h\n %u %d", name, MOLOCH_API_VERSION, apiversion);
+        LOGEXIT("Parser '%s' built with different version of moloch.h\n %d %d", name, MOLOCH_API_VERSION, apiversion);
     }
 
-    MolochClassify_t *c = MOLOCH_TYPE_ALLOC(MolochClassify_t);
+    if ((type & (MOLOCH_PARSERS_PORT_UDP | MOLOCH_PARSERS_PORT_TCP)) == 0) {
+        LOGEXIT("Parser '%s' has empty type", name);
+    }
+
+    MolochClassify_t *c = MOLOCH_TYPE_ALLOC0(MolochClassify_t);
     c->name     = name;
     c->uw       = uw;
     c->func     = func;
@@ -972,14 +983,17 @@ void moloch_parsers_classifier_register_port_internal(const char *name, void *uw
 void moloch_parsers_classifier_register_tcp_internal(const char *name, void *uw, int offset, const unsigned char *match, int matchlen, MolochClassifyFunc func, size_t sessionsize, int apiversion)
 {
     if (sizeof(MolochSession_t) != sessionsize) {
-        LOGEXIT("Plugin '%s' built with different version of moloch.h\n %lu != %lu", name, sizeof(MolochSession_t),  sessionsize);
+        LOGEXIT("Parser '%s' built with different version of moloch.h\n %u != %u", name, (unsigned int)sizeof(MolochSession_t),  (unsigned int)sessionsize);
     }
 
     if (MOLOCH_API_VERSION != apiversion) {
-        LOGEXIT("Plugin '%s' built with different version of moloch.h\n %u %d", name, MOLOCH_API_VERSION, apiversion);
+        LOGEXIT("Parser '%s' built with different version of moloch.h\n %d %d", name, MOLOCH_API_VERSION, apiversion);
     }
 
-    MolochClassify_t *c = MOLOCH_TYPE_ALLOC(MolochClassify_t);
+    if (!match)
+        LOGEXIT("Can't have a null match for %s", name);
+
+    MolochClassify_t *c = MOLOCH_TYPE_ALLOC0(MolochClassify_t);
     c->name     = name;
     c->uw       = uw;
     c->offset   = offset;
@@ -988,8 +1002,11 @@ void moloch_parsers_classifier_register_tcp_internal(const char *name, void *uw,
     c->minlen   = matchlen + offset;
     c->func     = func;
 
-    if (config.debug)
-        LOG("adding %s matchlen:%d offset:%d match %s ", name, matchlen, offset, match);
+    if (config.debug) {
+        char hex[1000];
+        moloch_sprint_hex_string(hex, match, matchlen);
+        LOG("adding %s matchlen:%d offset:%d match %s (0x%s)", name, matchlen, offset, match, hex);
+    }
     if (matchlen == 0 || offset != 0) {
         moloch_parsers_classifier_add(&classifersTcp0, c);
     } else if (matchlen == 1) {
@@ -1004,14 +1021,14 @@ void moloch_parsers_classifier_register_tcp_internal(const char *name, void *uw,
 void moloch_parsers_classifier_register_udp_internal(const char *name, void *uw, int offset, const unsigned char *match, int matchlen, MolochClassifyFunc func, size_t sessionsize, int apiversion)
 {
     if (sizeof(MolochSession_t) != sessionsize) {
-        LOGEXIT("Plugin '%s' built with different version of moloch.h", name);
+        LOGEXIT("Parser '%s' built with different version of moloch.h", name);
     }
 
     if (MOLOCH_API_VERSION != apiversion) {
-        LOGEXIT("Plugin '%s' built with different version of moloch.h", name);
+        LOGEXIT("Parser '%s' built with different version of moloch.h", name);
     }
 
-    MolochClassify_t *c = MOLOCH_TYPE_ALLOC(MolochClassify_t);
+    MolochClassify_t *c = MOLOCH_TYPE_ALLOC0(MolochClassify_t);
     c->name     = name;
     c->uw       = uw;
     c->offset   = offset;
@@ -1071,6 +1088,8 @@ void moloch_parsers_classify_udp(MolochSession_t *session, const unsigned char *
     }
 
     moloch_rules_run_after_classify(session);
+    if (config.yara && !config.yaraEveryPacket && !session->stopYara)
+        moloch_yara_execute(session, data, remaining, 0);
 }
 /******************************************************************************/
 void moloch_parsers_classify_tcp(MolochSession_t *session, const unsigned char *data, int remaining, int which)
@@ -1112,4 +1131,6 @@ void moloch_parsers_classify_tcp(MolochSession_t *session, const unsigned char *
     }
 
     moloch_rules_run_after_classify(session);
+    if (config.yara && !config.yaraEveryPacket && !session->stopYara)
+        moloch_yara_execute(session, data, remaining, 0);
 }

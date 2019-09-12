@@ -1,0 +1,26 @@
+install_sh = @install_sh@
+mkdir_p = @mkdir_p@
+INSTALL = @INSTALL@
+PARLIAMENTDIR = @prefix@/parliament
+CP = /bin/cp
+
+
+all:
+
+check:
+	npm ci
+	npm run build
+
+install:
+	@mkdir -p "$(PARLIAMENTDIR)" "$(PARLIAMENTDIR)/vueapp"
+	$(INSTALL) *.js package.json package-lock.json $(PARLIAMENTDIR)
+	npm ci
+	npm run build
+	$(CP) -pr favicon.ico $(PARLIAMENTDIR)
+	$(CP) -pr vueapp/dist "$(PARLIAMENTDIR)/vueapp"
+	(cd $(PARLIAMENTDIR) ; npm ci --production)
+	rm -f $(PARLIAMENTDIR)/package-lock.json
+
+distclean realclean clean:
+	rm -rf node_modules
+	rm -rf vueapp/dist

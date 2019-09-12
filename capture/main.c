@@ -47,7 +47,18 @@ extern MolochPcapFileHdr_t     pcapFileHeader;
 MOLOCH_LOCK_DEFINE(LOG);
 
 /******************************************************************************/
-static gboolean showVersion    = FALSE;
+LOCAL  gboolean showVersion    = FALSE;
+
+#define FREE_LATER_SIZE 32768
+LOCAL int freeLaterFront;
+LOCAL int freeLaterBack;
+typedef struct {
+    void              *ptr;
+    GDestroyNotify     cb;
+    uint32_t           sec;
+} MolochFreeLater_t;
+MolochFreeLater_t  freeLaterList[FREE_LATER_SIZE];
+MOLOCH_LOCK_DEFINE(freeLaterList);
 
 /******************************************************************************/
 gboolean moloch_debug_flag()
@@ -57,18 +68,42 @@ gboolean moloch_debug_flag()
     return TRUE;
 }
 
-static GOptionEntry entries[] =
+/******************************************************************************/
+gboolean moloch_cmdline_option(const gchar *option_name, const gchar *input, gpointer UNUSED(data), GError **UNUSED(error))
+{
+    char *equal = strchr(input, '=');
+    if (!equal)
+        LOGEXIT("%s requires a '=' in value %s", option_name, input);
+
+    char *key = g_strndup(input, equal - input);
+    char *value = g_strdup(equal + 1);
+
+    if (!config.override) {
+        config.override = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, g_free);
+    }
+    g_hash_table_insert(config.override, key, value);
+
+    return TRUE;
+}
+/******************************************************************************/
+
+LOCAL  GOptionEntry entries[] =
 {
     { "config",    'c',                    0, G_OPTION_ARG_FILENAME,       &config.configFile,    "Config file name, default '/data/moloch/etc/config.ini'", NULL },
     { "pcapfile",  'r',                    0, G_OPTION_ARG_FILENAME_ARRAY, &config.pcapReadFiles, "Offline pcap file", NULL },
     { "pcapdir",   'R',                    0, G_OPTION_ARG_FILENAME_ARRAY, &config.pcapReadDirs,  "Offline pcap directory, all *.pcap files will be processed", NULL },
     { "monitor",   'm',                    0, G_OPTION_ARG_NONE,           &config.pcapMonitor,   "Used with -R option monitors the directory for closed files", NULL },
+    { "packetcnt",   0,                    0, G_OPTION_ARG_INT,            &config.pktsToRead,    "Number of packets to read from each offline file", NULL},
     { "delete",      0,                    0, G_OPTION_ARG_NONE,           &config.pcapDelete,    "In offline mode delete files once processed, requires --copy", NULL },
     { "skip",      's',                    0, G_OPTION_ARG_NONE,           &config.pcapSkip,      "Used with -R option and without --copy, skip files already processed", NULL },
+    { "reprocess",   0,                    0, G_OPTION_ARG_NONE,           &config.pcapReprocess, "In offline mode reprocess files, use the same files table entry", NULL },
     { "recursive",   0,                    0, G_OPTION_ARG_NONE,           &config.pcapRecursive, "When in offline pcap directory mode, recurse sub directories", NULL },
     { "node",      'n',                    0, G_OPTION_ARG_STRING,         &config.nodeName,      "Our node name, defaults to hostname.  Multiple nodes can run on same host", NULL },
+    { "host",        0,                    0, G_OPTION_ARG_STRING,         &config.hostName,      "Override hostname, this is what remote viewers will use to connect", NULL },
     { "tag",       't',                    0, G_OPTION_ARG_STRING_ARRAY,   &config.extraTags,     "Extra tag to add to all packets, can be used multiple times", NULL },
+    { "filelist",  'F',                    0, G_OPTION_ARG_STRING_ARRAY,   &config.pcapFileLists, "File that has a list of pcap file names, 1 per line", NULL },
     { "op",          0,                    0, G_OPTION_ARG_STRING_ARRAY,   &config.extraOps,      "FieldExpr=Value to set on all session, can be used multiple times", NULL},
+    { "option",    'o',                    0, G_OPTION_ARG_CALLBACK,       moloch_cmdline_option, "Key=Value to override config.ini", NULL},
     { "version",   'v',                    0, G_OPTION_ARG_NONE,           &showVersion,          "Show version number", NULL },
     { "debug",     'd', G_OPTION_FLAG_NO_ARG, G_OPTION_ARG_CALLBACK,       moloch_debug_flag,     "Turn on all debugging", NULL },
     { "quiet",     'q',                    0, G_OPTION_ARG_NONE,           &config.quiet,         "Turn off regular logging", NULL },
@@ -77,7 +112,10 @@ static GOptionEntry entries[] =
     { "flush",       0,                    0, G_OPTION_ARG_NONE,           &config.flushBetween,  "In offline mode flush streams between files", NULL },
     { "nospi",       0, G_OPTION_FLAG_HIDDEN, G_OPTION_ARG_NONE,           &config.noSPI,         "no SPI data written to ES", NULL },
     { "tests",       0, G_OPTION_FLAG_HIDDEN, G_OPTION_ARG_NONE,           &config.tests,         "Output test suite information", NULL },
-    { "noLoadTags",  0, G_OPTION_FLAG_HIDDEN, G_OPTION_ARG_NONE,           &config.noLoadTags,    "Don't load tags at startup", NULL },
+    { "nostats",     0, G_OPTION_FLAG_HIDDEN, G_OPTION_ARG_NONE,           &config.noStats,       "Don't send node stats", NULL },
+    { "insecure",    0,                    0, G_OPTION_ARG_NONE,           &config.insecure,      "insecure https calls", NULL },
+    { "nolockpcap",  0,                    0, G_OPTION_ARG_NONE,           &config.noLockPcap,    "Don't lock offline pcap files (ie., allow deletion)", NULL },
+    { "ignoreerrors",0, G_OPTION_FLAG_HIDDEN, G_OPTION_ARG_NONE,           &config.ignoreErrors,  "Ignore most errors and continue", NULL },
     { NULL,          0, 0,                                    0,           NULL, NULL, NULL }
 };
 
@@ -90,6 +128,8 @@ void free_args()
     g_free(config.configFile);
     if (config.pcapReadFiles)
         g_strfreev(config.pcapReadFiles);
+    if (config.pcapFileLists)
+        g_strfreev(config.pcapFileLists);
     if (config.pcapReadDirs)
         g_strfreev(config.pcapReadDirs);
     if (config.extraTags)
@@ -105,7 +145,7 @@ void parse_args(int argc, char **argv)
 
     extern char *curl_version(void);
     extern char *pcre_version(void);
-    extern char *GeoIP_lib_version(void);
+    extern const char *MMDB_lib_version(void);
 
     context = g_option_context_new ("- capture");
     g_option_context_add_main_entries (context, entries, NULL);
@@ -117,20 +157,23 @@ void parse_args(int argc, char **argv)
 
     g_option_context_free(context);
 
-    config.pcapReadOffline = (config.pcapReadFiles || config.pcapReadDirs);
+    config.pcapReadOffline = (config.pcapReadFiles || config.pcapReadDirs || config.pcapFileLists);
 
     if (!config.configFile)
         config.configFile = g_strdup("/data/moloch/etc/config.ini");
 
+    if (showVersion || config.debug) {
+        printf("moloch-capture %s/%s session size=%d packet size=%d api=%d\n", PACKAGE_VERSION, BUILD_VERSION, (int)sizeof(MolochSession_t), (int)sizeof(MolochPacket_t), MOLOCH_API_VERSION);
+    }
+
     if (showVersion) {
-        printf("moloch-capture %s/%s session size=%zd packet size=%zd\n", PACKAGE_VERSION, BUILD_VERSION, sizeof(MolochSession_t), sizeof(MolochPacket_t));
         printf("glib2: %u.%u.%u\n", glib_major_version, glib_minor_version, glib_micro_version);
         printf("libpcap: %s\n", pcap_lib_version());
         printf("curl: %s\n", curl_version());
         printf("pcre: %s\n", pcre_version());
         //printf("magic: %d\n", magic_version());
         printf("yara: %s\n", moloch_yara_version());
-        printf("GeoIP: %s\n", GeoIP_lib_version());
+        printf("maxminddb: %s\n", MMDB_lib_version());
 
         exit(0);
     }
@@ -139,21 +182,11 @@ void parse_args(int argc, char **argv)
         glib_minor_version !=  GLIB_MINOR_VERSION ||
         glib_micro_version !=  GLIB_MICRO_VERSION) {
 
-        LOG("WARNING - gilb compiled %d.%d.%d vs linked %d.%d.%d",
+        LOG("WARNING - gilb compiled %d.%d.%d vs linked %u.%u.%u",
                 GLIB_MAJOR_VERSION, GLIB_MINOR_VERSION, GLIB_MICRO_VERSION,
                 glib_major_version, glib_minor_version, glib_micro_version);
     }
 
-
-    if (!config.nodeName) {
-        config.nodeName = g_malloc(256);
-        gethostname(config.nodeName, 256);
-        config.nodeName[255] = 0;
-        char *dot = strchr(config.nodeName, '.');
-        if (dot) {
-            *dot = 0;
-        }
-    }
 
     if (!config.hostName) {
         config.hostName = malloc(256);
@@ -165,10 +198,18 @@ void parse_args(int argc, char **argv)
                 g_strlcat(config.hostName, ".", 255);
                 g_strlcat(config.hostName, domainname, 255);
             } else {
-                LOG("WARNING: gethostname doesn't return a fully qualified name and getdomainname failed, this may cause issues when viewing pcaps - %s", config.hostName);
+                LOG("WARNING: gethostname doesn't return a fully qualified name and getdomainname failed, this may cause issues when viewing pcaps, use the --host option - %s", config.hostName);
             }
         }
         config.hostName[255] = 0;
+    }
+
+    if (!config.nodeName) {
+        config.nodeName = g_strdup(config.hostName);
+        char *dot = strchr(config.nodeName, '.');
+        if (dot) {
+            *dot = 0;
+        }
     }
 
     if (config.debug) {
@@ -202,18 +243,59 @@ void parse_args(int argc, char **argv)
     }
 }
 /******************************************************************************/
+void moloch_free_later(void *ptr, GDestroyNotify cb)
+{
+    struct timespec currentTime;
+    clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &currentTime);
+
+    MOLOCH_LOCK(freeLaterList);
+    if ((freeLaterBack + 1 ) % FREE_LATER_SIZE == freeLaterFront) {
+        freeLaterList[freeLaterFront].cb(freeLaterList[freeLaterFront].ptr);
+        freeLaterFront = (freeLaterFront + 1 ) % FREE_LATER_SIZE;
+    }
+
+    freeLaterList[freeLaterBack].sec = currentTime.tv_sec + 7;
+    freeLaterList[freeLaterBack].ptr = ptr;
+    freeLaterList[freeLaterBack].cb  = cb;
+    freeLaterBack = (freeLaterBack + 1 ) % FREE_LATER_SIZE;
+    MOLOCH_UNLOCK(freeLaterList);
+}
+/******************************************************************************/
+LOCAL gboolean moloch_free_later_check (gpointer UNUSED(user_data))
+{
+    if (freeLaterFront == freeLaterBack)
+        return TRUE;
+
+    struct timespec currentTime;
+    clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &currentTime);
+    MOLOCH_LOCK(freeLaterList);
+    while (freeLaterFront != freeLaterBack &&
+           freeLaterList[freeLaterFront].sec < currentTime.tv_sec) {
+        freeLaterList[freeLaterFront].cb(freeLaterList[freeLaterFront].ptr);
+        freeLaterFront = (freeLaterFront + 1 ) % FREE_LATER_SIZE;
+    }
+    MOLOCH_UNLOCK(freeLaterList);
+    return TRUE;
+}
+/******************************************************************************/
+LOCAL void moloch_free_later_init()
+{
+    g_timeout_add_seconds(1, moloch_free_later_check, 0);
+}
+
+/******************************************************************************/
 void *moloch_size_alloc(int size, int zero)
 {
     size += 8;
     void *mem = (zero?g_slice_alloc0(size):g_slice_alloc(size));
     memcpy(mem, &size, 4);
-    return mem + 8;
+    return (char *)mem + 8;
 }
 /******************************************************************************/
 int moloch_size_free(void *mem)
 {
     int size;
-    mem -= 8;
+    mem = (char *)mem - 8;
 
     memcpy(&size, mem, 4);
     g_slice_free1(size, mem);
@@ -322,9 +404,10 @@ gboolean moloch_string_add(void *hashv, char *string, gpointer uw, gboolean copy
     return TRUE;
 }
 /******************************************************************************/
+SUPPRESS_UNSIGNED_INTEGER_OVERFLOW
 uint32_t moloch_string_hash(const void *key)
 {
-    char *p = (char *)key;
+    unsigned char *p = (unsigned char *)key;
     uint32_t n = 0;
     while (*p) {
         n = (n << 5) - n + *p;
@@ -333,9 +416,10 @@ uint32_t moloch_string_hash(const void *key)
     return n;
 }
 /******************************************************************************/
+SUPPRESS_UNSIGNED_INTEGER_OVERFLOW
 uint32_t moloch_string_hash_len(const void *key, int len)
 {
-    char *p = (char *)key;
+    unsigned char *p = (unsigned char *)key;
     uint32_t n = 0;
     while (len) {
         n = (n << 5) - n + *p;
@@ -382,12 +466,12 @@ typedef struct {
 } MolochWatchFd_t;
 
 /******************************************************************************/
-static void moloch_gio_destroy(gpointer data)
+LOCAL void moloch_gio_destroy(gpointer data)
 {
     g_free(data);
 }
 /******************************************************************************/
-static gboolean moloch_gio_invoke(GIOChannel *source, GIOCondition condition, gpointer data)
+LOCAL gboolean moloch_gio_invoke(GIOChannel *source, GIOCondition condition, gpointer data)
 {
     MolochWatchFd_t *watch = data;
 
@@ -443,9 +527,9 @@ void moloch_drop_privileges()
 
 }
 /******************************************************************************/
-static MolochCanQuitFunc  canQuitFuncs[20];
-static const char        *canQuitNames[20];
-int                       canQuitFuncsNum;
+LOCAL  MolochCanQuitFunc  canQuitFuncs[20];
+LOCAL  const char        *canQuitNames[20];
+LOCAL  int                canQuitFuncsNum;
 
 void moloch_add_can_quit (MolochCanQuitFunc func, const char *name)
 {
@@ -459,25 +543,27 @@ void moloch_add_can_quit (MolochCanQuitFunc func, const char *name)
 }
 /******************************************************************************/
 /*
- * Don't actually end main loop until all tags are loaded
- * TRUE - call again in 100ms
- * FALSE - don't call again
+ * Don't actually end main loop until all the various pieces are done
  */
 gboolean moloch_quit_gfunc (gpointer UNUSED(user_data))
 {
-static gboolean firstRun   = TRUE;
+LOCAL gboolean readerExit   = TRUE;
+LOCAL gboolean writerExit   = TRUE;
 
-// On the first run shutdown reader and stuff
-    if (firstRun) {
-        firstRun = FALSE;
+// On the first run shutdown reader and sessions
+    if (readerExit) {
+        readerExit = FALSE;
         if (moloch_reader_stop)
             moloch_reader_stop();
         moloch_readers_exit();
         moloch_packet_exit();
         moloch_session_exit();
-        return TRUE;
+        if (config.debug)
+            LOG("Read exit finished");
+        return G_SOURCE_CONTINUE;
     }
 
+// Wait for all the can quits to signal all clear
     int i;
     for (i = 0; i < canQuitFuncsNum; i++) {
         int val = canQuitFuncs[i]();
@@ -485,16 +571,30 @@ static gboolean firstRun   = TRUE;
             if (config.debug && canQuitNames[i]) {
                 LOG ("Can't quit, %s is %d", canQuitNames[i], val);
             }
-            return TRUE;
+            return G_SOURCE_CONTINUE;
         }
     }
 
+// Once all clear stop the writer and wait for all clears again
+    if (writerExit) {
+        writerExit = FALSE;
+        if (!config.dryRun && config.copyPcap) {
+            moloch_writer_exit();
+            if (config.debug)
+                LOG("Write exit finished");
+            return G_SOURCE_CONTINUE;
+        }
+    }
+
+// Can quit the main loop now
     g_main_loop_quit(mainLoop);
-    return FALSE;
+    return G_SOURCE_REMOVE;
 }
 /******************************************************************************/
 void moloch_quit()
 {
+    if (config.debug)
+        LOG("Quitting");
     config.quitting = TRUE;
     g_timeout_add(100, moloch_quit_gfunc, 0);
 }
@@ -506,7 +606,7 @@ void moloch_quit()
  */
 gboolean moloch_ready_gfunc (gpointer UNUSED(user_data))
 {
-    if (moloch_db_tags_loading() || moloch_http_queue_length(esServer))
+    if (moloch_http_queue_length(esServer))
         return TRUE;
 
     if (config.debug)
@@ -527,7 +627,7 @@ gboolean moloch_ready_gfunc (gpointer UNUSED(user_data))
         }
     }
     moloch_reader_start();
-    if (pcapFileHeader.linktype == 0 || pcapFileHeader.snaplen == 0)
+    if (!config.pcapReadOffline && (pcapFileHeader.linktype == 0 || pcapFileHeader.snaplen == 0))
         LOGEXIT("Reader didn't call moloch_packet_set_linksnap");
     return FALSE;
 }
@@ -572,13 +672,13 @@ void moloch_mlockall_init()
     struct rlimit l;
     getrlimit(RLIMIT_MEMLOCK, &l);
     if (l.rlim_max != RLIM_INFINITY && l.rlim_max < 4000000000LL) {
-        LOG("WARNING: memlock in limits.conf must be unlimited or at least 4000000, currently %lu", (long)l.rlim_max/1024);
+        LOG("WARNING: memlock in limits.conf must be unlimited or at least 4000000, currently %lu", (unsigned long)l.rlim_max/1024);
         return;
     }
 
     if (l.rlim_cur != l.rlim_max) {
         if (config.debug)
-            LOG("Setting memlock soft to %lu", (long)l.rlim_max);
+            LOG("Setting memlock soft to %lu", (unsigned long)l.rlim_max);
         l.rlim_cur = l.rlim_max;
         setrlimit(RLIMIT_MEMLOCK, &l);
     }
@@ -587,15 +687,77 @@ void moloch_mlockall_init()
     if (result != 0) {
         LOG("WARNING: Failed to mlockall - %s", strerror(errno));
     } else if (config.debug) {
-        LOG("mlockall with max of %lu", (long)l.rlim_max);
+        LOG("mlockall with max of %lu", (unsigned long)l.rlim_max);
     }
 #endif
 }
 /******************************************************************************/
+#ifdef FUZZLOCH
+
+/* This replaces main for libFuzzer.  Basically initialized everything like main
+ * would for starting up and set some important settings.  Must be run from tests
+ * directory, and config.test.ini will be loaded for fuzz node.
+ */
+
+MolochPacketBatch_t   batch;
+
+int
+LLVMFuzzerInitialize(int *UNUSED(argc), char ***UNUSED(argv))
+{
+    config.configFile = g_strdup("config.test.ini");
+    config.dryRun = 1;
+    config.pcapReadOffline = 1;
+    config.hostName = strdup("fuzz.example.com");
+    config.nodeName = strdup("fuzz");
+    moloch_free_later_init();
+    moloch_hex_init();
+    moloch_config_init();
+    moloch_writers_init();
+    moloch_writers_start("null");
+    moloch_readers_init();
+    moloch_readers_set("null");
+    moloch_plugins_init();
+    moloch_field_init();
+    moloch_http_init();
+    moloch_db_init();
+    moloch_packet_init();
+    moloch_config_load_local_ips();
+    moloch_config_load_packet_ips();
+    moloch_yara_init();
+    moloch_parsers_init();
+    moloch_session_init();
+    moloch_plugins_load(config.plugins);
+    moloch_rules_init();
+    moloch_packet_batch_init(&batch);
+    return 0;
+}
+
+/******************************************************************************/
+/* In libFuzzer mode this is called for each packet.
+ * There are no packet threads in fuzz mode, and the batch call will actually
+ * process the packet.  The current time just increases for each packet.
+ */
+int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
+    MolochPacket_t       *packet = MOLOCH_TYPE_ALLOC0(MolochPacket_t);
+    static uint64_t       ts = 10000;
+
+    packet->pktlen        = size;
+    packet->pkt           = (u_char *)data;
+    packet->ts.tv_sec     = ts >> 4;
+    packet->ts.tv_usec    = ts & 0x8;
+    ts++;
+    packet->readerFilePos = 0;
+    packet->readerPos     = 0;
+
+    // In FUZZ mode batch will actually process it
+    moloch_packet_batch(&batch, packet);
+
+    return 0;
+}
+
+#else
 int main(int argc, char **argv)
 {
-    LOG("THREAD %p", (gpointer)pthread_self());
-
     signal(SIGHUP, reload);
     signal(SIGINT, controlc);
     signal(SIGUSR1, exit);
@@ -604,6 +766,13 @@ int main(int argc, char **argv)
     mainLoop = g_main_loop_new(NULL, FALSE);
 
     parse_args(argc, argv);
+    if (config.debug)
+        LOG("THREAD %p", (gpointer)pthread_self());
+
+    if (config.insecure)
+        LOG("\n\nDON'T DO IT!!!! `--insecure` is a bad idea\n\n");
+
+    moloch_free_later_init();
     moloch_hex_init();
     moloch_config_init();
     moloch_writers_init();
@@ -634,23 +803,20 @@ int main(int argc, char **argv)
 
     g_main_loop_run(mainLoop);
 
-    LOG("Final cleanup");
+    if (!config.pcapReadOffline || config.debug)
+        LOG("Final cleanup");
     moloch_plugins_exit();
     moloch_parsers_exit();
-    moloch_yara_exit();
     moloch_db_exit();
     moloch_http_exit();
     moloch_field_exit();
     moloch_config_exit();
     moloch_rules_exit();
+    moloch_yara_exit();
 
     g_main_loop_unref(mainLoop);
-
-    if (!config.dryRun && config.copyPcap) {
-        moloch_writer_exit();
-    }
-
 
     free_args();
     exit(0);
 }
+#endif

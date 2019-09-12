@@ -18,9 +18,9 @@
 
 extern MolochConfig_t        config;
 
-static int realmField;
-static int cnameField;
-static int snameField;
+LOCAL  int realmField;
+LOCAL  int cnameField;
+LOCAL  int snameField;
 
 #define KRB5_MAX_SIZE 4096
 typedef struct {
@@ -35,7 +35,7 @@ typedef struct {
 --      name-string[1]          SEQUENCE OF GeneralString
 --}
  */
-void krb5_parse_principal_name(MolochSession_t *session, int field, const unsigned char *data, int len)
+LOCAL void krb5_parse_principal_name(MolochSession_t *session, int field, const unsigned char *data, int len)
 {
     MolochASNSeq_t seq[10];
 
@@ -50,7 +50,8 @@ void krb5_parse_principal_name(MolochSession_t *session, int field, const unsign
     const char *value0, *value1;
     if (num == 1) {
         value0 = moloch_parsers_asn_sequence_to_string(&seq[0], &len0);
-        moloch_field_string_add(field, session, value0, len0, TRUE);
+        if (value0 && len0 > 0)
+            moloch_field_string_add(field, session, value0, len0, TRUE);
     } else if (num == 2) {
         char str[255];
         value0 = moloch_parsers_asn_sequence_to_string(&seq[0], &len0);
@@ -79,7 +80,7 @@ void krb5_parse_principal_name(MolochSession_t *session, int field, const unsign
 --      additional-tickets[11]  SEQUENCE OF Ticket OPTIONAL
 --}
 */
-void krb5_parse_req_body(MolochSession_t *session, const unsigned char *data, int len)
+LOCAL void krb5_parse_req_body(MolochSession_t *session, const unsigned char *data, int len)
 {
     MolochASNSeq_t seq[12];
 
@@ -96,7 +97,8 @@ void krb5_parse_req_body(MolochSession_t *session, const unsigned char *data, in
             break;
         case 2:
             value = moloch_parsers_asn_sequence_to_string(&seq[i], &vlen);
-            moloch_field_string_add(realmField, session, value, vlen, TRUE);
+            if (value && vlen > 0)
+                moloch_field_string_add(realmField, session, value, vlen, TRUE);
             break;
         case 3:
             krb5_parse_principal_name(session, snameField, seq[i].value, seq[i].len);
@@ -114,12 +116,12 @@ void krb5_parse_req_body(MolochSession_t *session, const unsigned char *data, in
 --      req-body[4]             KDC-REQ-BODY
 --}
 */
-void krb5_parse_req(MolochSession_t *session, const unsigned char *data, int len)
+LOCAL void krb5_parse_req(MolochSession_t *session, const unsigned char *data, int len)
 {
     MolochASNSeq_t seq[5];
 
     int num = moloch_parsers_asn_get_sequence(seq, 5, data, len, TRUE);
-    if (num < 3)
+    if (num < 3 || seq[0].len == 0 || seq[1].len == 0)
         return;
 
     if (!seq[0].pc || seq[0].tag != 1 || seq[0].value[seq[0].len - 1] != 5) {
@@ -151,7 +153,7 @@ void krb5_parse_req(MolochSession_t *session, const unsigned char *data, int len
 --      enc-part[6]             EncryptedData
 --}
 */
-void krb5_parse_rep(MolochSession_t *UNUSED(session), const unsigned char *UNUSED(data), int UNUSED(len))
+LOCAL void krb5_parse_rep(MolochSession_t *UNUSED(session), const unsigned char *UNUSED(data), int UNUSED(len))
 {
 }
 /******************************************************************************/
@@ -172,11 +174,11 @@ void krb5_parse_rep(MolochSession_t *UNUSED(session), const unsigned char *UNUSE
 --      e-data[12]              OCTET STRING OPTIONAL
 --}
 */
-void krb5_parse_error(MolochSession_t *UNUSED(session), const unsigned char *UNUSED(data), int UNUSED(len))
+LOCAL void krb5_parse_error(MolochSession_t *UNUSED(session), const unsigned char *UNUSED(data), int UNUSED(len))
 {
 }
 /******************************************************************************/
-void krb5_parse(MolochSession_t *session, const unsigned char *data, int len)
+LOCAL void krb5_parse(MolochSession_t *session, const unsigned char *data, int len)
 {
     BSB obsb;
     uint32_t opc, msgType, olen;
@@ -185,7 +187,7 @@ void krb5_parse(MolochSession_t *session, const unsigned char *data, int len)
     BSB_INIT(obsb, data, len);
     ovalue = moloch_parsers_asn_get_tlv(&obsb, &opc, &msgType, &olen);
 #ifdef KRB5_DEBUG
-    LOG("DEBUG1 - opc:%d msgType:%d olen:%d", opc, msgType, olen);
+    LOG("DEBUG1 - opc:%u msgType:%u olen:%u", opc, msgType, olen);
 #endif
     if (!opc)
         return;
@@ -205,13 +207,13 @@ void krb5_parse(MolochSession_t *session, const unsigned char *data, int len)
     }
 }
 /******************************************************************************/
-int krb5_udp_parser(MolochSession_t *session, void *UNUSED(uw), const unsigned char *data, int len, int UNUSED(which))
+LOCAL int krb5_udp_parser(MolochSession_t *session, void *UNUSED(uw), const unsigned char *data, int len, int UNUSED(which))
 {
     krb5_parse(session, data, len);
     return 0;
 }
 /******************************************************************************/
-void krb5_udp_classify(MolochSession_t *session, const unsigned char *data, int len, int UNUSED(which), void *UNUSED(uw))
+LOCAL void krb5_udp_classify(MolochSession_t *session, const unsigned char *data, int len, int UNUSED(which), void *UNUSED(uw))
 {
     if (moloch_session_has_protocol(session, "krb5"))
         return;
@@ -222,21 +224,21 @@ void krb5_udp_classify(MolochSession_t *session, const unsigned char *data, int 
     BSB_INIT(obsb, data, len);
     moloch_parsers_asn_get_tlv(&obsb, &opc, &otag, &olen);
 #ifdef KRB5_DEBUG
-    LOG("enter %d %d %d", opc, otag, olen);
+    LOG("enter %u %u %u", opc, otag, olen);
 #endif
     if (opc && (otag == 10 || otag == 12 || otag == 30) && len >= (int)olen) {
         moloch_parsers_register(session, krb5_udp_parser, 0, 0);
     }
 }
 /******************************************************************************/
-void krb5_free(MolochSession_t UNUSED(*session), void *uw)
+LOCAL void krb5_free(MolochSession_t UNUSED(*session), void *uw)
 {
     KRB5Info_t            *krb5          = uw;
 
     MOLOCH_TYPE_FREE(KRB5Info_t, krb5);
 }
 /******************************************************************************/
-int krb5_tcp_parser(MolochSession_t *session, void *uw, const unsigned char *data, int remaining, int which)
+LOCAL int krb5_tcp_parser(MolochSession_t *session, void *uw, const unsigned char *data, int remaining, int which)
 {
     KRB5Info_t *krb5 = uw;
 
@@ -256,9 +258,9 @@ int krb5_tcp_parser(MolochSession_t *session, void *uw, const unsigned char *dat
     return 0;
 }
 /******************************************************************************/
-void krb5_tcp_classify(MolochSession_t *session, const unsigned char *data, int UNUSED(len), int UNUSED(which), void *UNUSED(uw))
+LOCAL void krb5_tcp_classify(MolochSession_t *session, const unsigned char *data, int UNUSED(len), int UNUSED(which), void *UNUSED(uw))
 {
-    if (which !=0 || data[0] != 0 || data[1] != 0)
+    if (len < 2 || which != 0 || data[0] != 0 || data[1] != 0)
         return;
 
     KRB5Info_t            *krb5          = MOLOCH_TYPE_ALLOC(KRB5Info_t);
@@ -271,22 +273,22 @@ void moloch_parser_init()
 {
 
     realmField = moloch_field_define("krb5", "termfield",
-        "krb5.realm", "Realm", "krb5.realm-term",
+        "krb5.realm", "Realm", "krb5.realm",
         "Kerberos 5 Realm",
-        MOLOCH_FIELD_TYPE_STR_HASH,  MOLOCH_FIELD_FLAG_CNT,
-        NULL);
+        MOLOCH_FIELD_TYPE_STR_GHASH,  MOLOCH_FIELD_FLAG_CNT,
+        (char *)NULL);
 
     cnameField = moloch_field_define("krb5", "termfield",
-        "krb5.cname", "cname", "krb5.cname-term",
+        "krb5.cname", "cname", "krb5.cname",
         "Kerberos 5 cname",
-        MOLOCH_FIELD_TYPE_STR_HASH,  MOLOCH_FIELD_FLAG_CNT,
-        NULL);
+        MOLOCH_FIELD_TYPE_STR_GHASH,  MOLOCH_FIELD_FLAG_CNT,
+        (char *)NULL);
 
     snameField = moloch_field_define("krb5", "termfield",
-        "krb5.sname", "sname", "krb5.sname-term",
+        "krb5.sname", "sname", "krb5.sname",
         "Kerberos 5 sname",
-        MOLOCH_FIELD_TYPE_STR_HASH,  MOLOCH_FIELD_FLAG_CNT,
-        NULL);
+        MOLOCH_FIELD_TYPE_STR_GHASH,  MOLOCH_FIELD_FLAG_CNT,
+        (char *)NULL);
 
     moloch_parsers_classifier_register_udp("krb5", 0, 7, (unsigned char*)"\x03\x02\x01\x05", 4, krb5_udp_classify);
     moloch_parsers_classifier_register_udp("krb5", 0, 9, (unsigned char*)"\x03\x02\x01\x05", 4, krb5_udp_classify);

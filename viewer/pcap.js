@@ -2,13 +2,13 @@
 /* pcap.js -- represent a pcap file
  *
  * Copyright 2012-2016 AOL Inc. All rights reserved.
- * 
+ *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this Software except in compliance with the License.
  * You may obtain a copy of the License at
- * 
+ *
  *     http://www.apache.org/licenses/LICENSE-2.0
- * 
+ *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -21,7 +21,8 @@
 'use strict';
 
 var fs             = require('fs'),
-    crypto         = require('crypto');
+    crypto         = require('crypto'),
+    ipaddr         = require('ipaddr.js');
 
 var Pcap = module.exports = exports = function Pcap (key) {
   this.key     = key;
@@ -36,7 +37,9 @@ var internals = {
     6:  "tcp",
     17: "udp",
     47: "gre",
-    58: "icmpv6"
+    50: "esp",
+    58: "icmpv6",
+    132: "sctp"
   },
   pcaps: {}
 };
@@ -68,7 +71,7 @@ exports.make = function(key, header) {
     pcap.linkType   = pcap.headBuffer.readUInt32LE(20);
   }
   return pcap;
-}
+};
 
 Pcap.prototype.isOpen = function() {
   return this.fd !== undefined;
@@ -83,11 +86,11 @@ Pcap.prototype.open = function(filename, info) {
     this.encoding = info.encoding || "normal";
     if (info.dek) {
       var decipher = crypto.createDecipher("aes-192-cbc", info.kek);
-      this.encKey = Buffer.concat([decipher.update(new Buffer(info.dek, 'hex')), decipher.final()]);
+      this.encKey = Buffer.concat([decipher.update(Buffer.from(info.dek, 'hex')), decipher.final()]);
     }
 
     if (info.iv) {
-      var iv   = new Buffer(info.iv, 'hex');
+      var iv   = Buffer.from(info.iv, 'hex');
       this.iv  = Buffer.alloc(16);
       iv.copy(this.iv);
     }
@@ -117,18 +120,17 @@ Pcap.prototype.unref = function() {
     return;
   }
 
-  var self = this;
-  self.closing = true;
+  this.closing = true;
 
-  setTimeout(function() {
-    if (self.closing && self.count === 0) {
-      delete internals.pcaps[self.key];
-      if (self.fd) {
-        fs.close(self.fd);
+  setTimeout(() => {
+    if (this.closing && this.count === 0) {
+      delete internals.pcaps[this.key];
+      if (this.fd) {
+        fs.close(this.fd, () => {});
       }
-      delete self.fd;
+      delete this.fd;
     } else {
-      self.closing = false;
+      this.closing = false;
     }
   }, 500);
 };
@@ -136,7 +138,7 @@ Pcap.prototype.unref = function() {
 Pcap.prototype.createDecipher = function(pos) {
     this.iv.writeInt32BE(pos, 12);
     return crypto.createDecipheriv(this.encoding, this.encKey, this.iv);
-}
+};
 
 Pcap.prototype.readHeader = function(cb) {
   if (this.headBuffer) {
@@ -146,7 +148,7 @@ Pcap.prototype.readHeader = function(cb) {
     return this.headBuffer;
   }
 
-  this.headBuffer = new Buffer(24);
+  this.headBuffer = Buffer.alloc(24);
   fs.readSync(this.fd, this.headBuffer, 0, 24, 0);
 
   if (this.encoding === "aes-256-ctr") {
@@ -157,7 +159,7 @@ Pcap.prototype.readHeader = function(cb) {
     for (var i = 0; i < this.headBuffer.length; i++) {
       this.headBuffer[i] ^= this.encKey[i%256];
     }
-}
+};
 
 
   this.bigEndian  = this.headBuffer.readUInt32LE(0) === 0xd4c3b2a1;
@@ -174,46 +176,43 @@ Pcap.prototype.readHeader = function(cb) {
 };
 
 Pcap.prototype.readPacket = function(pos, cb) {
-  var self = this;
-
   // Hacky!! File isn't actually opened, try again soon
-  if (!self.fd) {
-    setTimeout(self.readPacket, 10, pos, cb);
+  if (!this.fd) {
+    setTimeout(this.readPacket, 10, pos, cb);
     return;
   }
 
-
-  var buffer = new Buffer(1792); // Divisible by 256 and 16 and > 1550
+  var buffer = Buffer.alloc(1792); // Divisible by 256 and 16 and > 1550
   var posoffset = 0;
 
-  if (self.encoding === "aes-256-ctr") {
+  if (this.encoding === "aes-256-ctr") {
     posoffset = pos%16;
-    pos = pos & ~0xf;
-  } else if (self.encoding === "xor-2048") {
+    pos = pos - posoffset; // Can't use & ~0xf because javascript is 32bit
+  } else if (this.encoding === "xor-2048") {
     posoffset = pos%256;
-    pos = pos & ~0xff;
+    pos = pos - posoffset; // Can't use & ~0xff because javascript is 32bit
   }
 
   try {
 
     // Try and read full packet and header in one read
-    fs.read(self.fd, buffer, 0, buffer.length, pos, function (err, bytesRead, buffer) {
+    fs.read(this.fd, buffer, 0, buffer.length, pos, (err, bytesRead, buffer) => {
       if (bytesRead - posoffset < 16) {
         return cb(null);
       }
 
-      if (self.encoding === "aes-256-ctr") {
-        var decipher = self.createDecipher(pos/16);
+      if (this.encoding === "aes-256-ctr") {
+        var decipher = this.createDecipher(pos/16);
         buffer = Buffer.concat([decipher.update(buffer),
                                          decipher.final()]).slice(posoffset);
-      } else if (self.encoding === "xor-2048") {
+      } else if (this.encoding === "xor-2048") {
         for (var i = posoffset; i < bytesRead; i++) {
-          buffer[i] ^= self.encKey[i%256];
+          buffer[i] ^= this.encKey[i%256];
         }
         buffer = buffer.slice(posoffset);
       }
 
-      var len = (self.bigEndian?buffer.readUInt32BE(8):buffer.readUInt32LE(8));
+      var len = (this.bigEndian?buffer.readUInt32BE(8):buffer.readUInt32LE(8));
 
       if (len < 0 || len > 0xffff) {
         return cb(undefined);
@@ -225,27 +224,27 @@ Pcap.prototype.readPacket = function(pos, cb) {
       }
       // Full packet didn't fit, get what was missed
       try {
-        var buffer2 = new Buffer((16 + len) - bytesRead - posoffset);
-        fs.read(self.fd, buffer2, 0, buffer2.length, pos+bytesRead, function (err, bytesRead, ignore) {
-          if (self.encoding === "aes-256-ctr") {
-            var decipher = self.createDecipher((pos+bytesRead)/16);
+        var buffer2 = Buffer.alloc((16 + len) - bytesRead - posoffset);
+        fs.read(this.fd, buffer2, 0, buffer2.length, pos+bytesRead, (err, bytesRead, ignore) => {
+          if (this.encoding === "aes-256-ctr") {
+            var decipher = this.createDecipher((pos+bytesRead)/16);
             return cb(Buffer.concat([buffer, decipher.update(buffer2),
                                          decipher.final()]));
-          } else if (self.encoding === "xor-2048") {
+          } else if (this.encoding === "xor-2048") {
             for (var i = posoffset; i < bytesRead; i++) {
-              buffer2[i] ^= self.encKey[i%256];
+              buffer2[i] ^= this.encKey[i%256];
             }
           }
 
           return cb(Buffer.concat([buffer, buffer2]));
         });
       } catch (e) {
-        console.log("Error ", e, "for file", self.filename);
+        console.log("Error ", e, "for file", this.filename);
         return cb (null);
       }
     });
   } catch (e) {
-    console.log("Error ", e, "for file", self.filename);
+    console.log("Error ", e, "for file", this.filename);
     return cb (null);
   }
 };
@@ -269,6 +268,10 @@ Pcap.prototype.scrubPacket = function(packet, pos, buf, entire) {
     case 17:
       pos += (packet.udp._pos + 8);
       len -= (packet.udp._pos + 8);
+      break;
+    case 132:
+      pos += (packet.sctp._pos + 8);
+      len -= (packet.sctp._pos + 8);
       break;
     default:
       throw "Unknown packet type, can't scrub";
@@ -303,40 +306,44 @@ Pcap.prototype.icmp = function (buffer, obj, pos) {
     type:      buffer[0],
     code:      buffer[1],
     sum:       buffer.readUInt16BE(2),
-    id:        buffer.readUInt16BE(4),
-    sequence:  buffer.readUInt16BE(6)
+    // id:        buffer.readUInt16BE(4),
+    // sequence:  buffer.readUInt16BE(6)
   };
 
-  obj.icmp.data = buffer.slice(8);
+  obj.icmp.data = buffer;
 };
 
 Pcap.prototype.tcp = function (buffer, obj, pos) {
-  obj.tcp = {
-    _pos:       pos,
-    length:     buffer.length,
-    sport:      buffer.readUInt16BE(0),
-    dport:      buffer.readUInt16BE(2),
-    seq:        buffer.readUInt32BE(4),
-    ack:        buffer.readUInt32BE(8),
-    off:        ((buffer[12] >> 4) & 0xf),
-    res1:       (buffer[12] & 0xf),
-    flags:      buffer[13],
-    res2:       (buffer[13] >> 6 & 0x3),
-    urgflag:    (buffer[13] >> 5 & 0x1),
-    ackflag:    (buffer[13] >> 4 & 0x1),
-    pshflag:    (buffer[13] >> 3 & 0x1),
-    rstflag:    (buffer[13] >> 2 & 0x1),
-    synflag:    (buffer[13] >> 1 & 0x1),
-    finflag:    (buffer[13] >> 0 & 0x1),
-    win:        buffer.readUInt16BE(14),
-    sum:        buffer.readUInt16BE(16),
-    urp:        buffer.readUInt16BE(18)
-  };
+  try {
+    obj.tcp = {
+      _pos:       pos,
+      length:     buffer.length,
+      sport:      buffer.readUInt16BE(0),
+      dport:      buffer.readUInt16BE(2),
+      seq:        buffer.readUInt32BE(4),
+      ack:        buffer.readUInt32BE(8),
+      off:        ((buffer[12] >> 4) & 0xf),
+      res1:       (buffer[12] & 0xf),
+      flags:      buffer[13],
+      res2:       (buffer[13] >> 6 & 0x3),
+      urgflag:    (buffer[13] >> 5 & 0x1),
+      ackflag:    (buffer[13] >> 4 & 0x1),
+      pshflag:    (buffer[13] >> 3 & 0x1),
+      rstflag:    (buffer[13] >> 2 & 0x1),
+      synflag:    (buffer[13] >> 1 & 0x1),
+      finflag:    (buffer[13] >> 0 & 0x1),
+      win:        buffer.readUInt16BE(14),
+      sum:        buffer.readUInt16BE(16),
+      urp:        buffer.readUInt16BE(18)
+    };
 
-  if (4*obj.tcp.off > buffer.length) {
-    obj.tcp.data = new Buffer(0);
-  } else {
-    obj.tcp.data = buffer.slice(4*obj.tcp.off);
+    if (4*obj.tcp.off > buffer.length) {
+      obj.tcp.data = Buffer.alloc(0);
+    } else {
+      obj.tcp.data = buffer.slice(4*obj.tcp.off);
+    }
+  } catch (e) {
+    console.trace("Couldn't parse tcp", e);
   }
 };
 
@@ -353,17 +360,35 @@ Pcap.prototype.udp = function (buffer, obj, pos) {
   obj.udp.data = buffer.slice(8);
 };
 
+Pcap.prototype.sctp = function (buffer, obj, pos) {
+  obj.sctp = {
+    _pos:       pos,
+    length:     buffer.length,
+    sport:      buffer.readUInt16BE(0),
+    dport:      buffer.readUInt16BE(2),
+  };
+
+  obj.sctp.data = buffer.slice(12);
+};
+
+Pcap.prototype.esp = function (buffer, obj, pos) {
+  obj.esp = {
+    _pos:      pos,
+    length:    buffer.length,
+  };
+
+  obj.esp.data = buffer;
+};
+
 Pcap.prototype.gre = function (buffer, obj, pos) {
   obj.gre = {
     flags_version: buffer.readUInt16BE(0),
     type:          buffer.readUInt16BE(2)
   };
+
   var bpos = 4;
-  var offset = 0;
   if (obj.gre.flags_version & (0x8000 | 0x4000)) {
-    bpos += 2;
-    offset = buffer.readUInt16BE(bpos);
-    bpos += 2;
+    bpos += 4;
   }
 
   // key
@@ -378,15 +403,40 @@ Pcap.prototype.gre = function (buffer, obj, pos) {
 
   // routing
   if (obj.gre.flags_version & 0x4000) {
-    bpos += 3;
     while (1) {
+      bpos += 3;
       var len = buffer.readUInt16BE(bpos);
+      bpos++;
       if (len === 0)
         break;
       bpos += len;
     }
   }
-  this.ip4(buffer.slice(bpos), obj, pos+bpos);
+
+  // ack number
+  if (obj.gre.flags_version & 0x0080) {
+    bpos += 4;
+  }
+
+  switch (obj.gre.type) {
+  case 0x0800:
+    this.ip4(buffer.slice(bpos), obj, pos+bpos);
+    break;
+  case 0x86dd:
+    this.ip6(buffer.slice(bpos), obj, pos+bpos);
+    break;
+  case 0x6559:
+    this.framerelay(buffer.slice(bpos), obj, pos+bpos);
+    break;
+  case 0x880b:
+    this.ppp(buffer.slice(bpos), obj, pos+bpos);
+    break;
+  case 0x88be:
+    this.ether(buffer.slice(bpos+8), obj, pos+bpos+8);
+    break;
+  default:
+    console.log("gre Unknown type", obj.gre.type);
+  }
 };
 
 Pcap.prototype.ip4 = function (buffer, obj, pos) {
@@ -415,11 +465,20 @@ Pcap.prototype.ip4 = function (buffer, obj, pos) {
   case 17:
     this.udp(buffer.slice(obj.ip.hl*4, obj.ip.len), obj, pos + obj.ip.hl*4);
     break;
+  case 41: // IPPROTO_IPV6
+    this.ip6(buffer.slice(obj.ip.hl*4, obj.ip.len), obj, pos + obj.ip.hl*4);
+    break;
+  case 50: // IPPROTO_ESP
+    this.esp(buffer.slice(obj.ip.hl*4, obj.ip.len), obj, pos + obj.ip.hl*4);
+    break;
   case 47:
     this.gre(buffer.slice(obj.ip.hl*4, obj.ip.len), obj, pos + obj.ip.hl*4);
     break;
+  case 132:
+    this.sctp(buffer.slice(obj.ip.hl*4, obj.ip.len), obj, pos + obj.ip.hl*4);
+    break;
   default:
-    console.log("Unknown ip.p", obj);
+    console.log("v4 Unknown ip.p", obj);
   }
 };
 
@@ -432,8 +491,8 @@ Pcap.prototype.ip6 = function (buffer, obj, pos) {
     len:    buffer.readUInt16BE(4),
     p: buffer[6],
     hopLimt:  buffer[7],
-    addr1:  buffer.slice(8,24).toString("hex"),
-    addr2:  buffer.slice(24,40).toString("hex")
+    addr1:  ipaddr.fromByteArray(buffer.slice(8,24)).toString(),
+    addr2:  ipaddr.fromByteArray(buffer.slice(24,40)).toString()
   };
 
   var offset = 40;
@@ -449,14 +508,26 @@ Pcap.prototype.ip6 = function (buffer, obj, pos) {
     case 58:
       this.icmp(buffer.slice(offset, offset+obj.ip.len), obj, pos + offset);
       return;
+    case 4: //IPPROTO_IPV4
+      this.ip4(buffer.slice(offset, offset+obj.ip.len), obj, pos + offset);
+      return;
     case 6:
       this.tcp(buffer.slice(offset, offset+obj.ip.len), obj, pos + offset);
       return;
     case 17:
       this.udp(buffer.slice(offset, offset+obj.ip.len), obj, pos + offset);
       return;
+    case 47:
+      this.gre(buffer.slice(offset, offset+obj.ip.len), obj, pos + offset);
+      return;
+    case 50: // IPPROTO_ESP
+      this.esp(buffer.slice(offset, offset+obj.ip.len), obj, pos + offset);
+      return;
+    case 132:
+      this.sctp(buffer.slice(offset, offset+obj.ip.len), obj, pos + offset);
+      return;
     default:
-      console.log("Unknown ip.p", obj);
+      console.log("v6 Unknown ip.p", obj);
       return;
     }
   }
@@ -481,6 +552,45 @@ Pcap.prototype.pppoe = function (buffer, obj, pos) {
   }
 };
 
+Pcap.prototype.ppp = function (buffer, obj, pos) {
+  obj.pppoe = {
+    type:   buffer.readUInt16BE(2),
+  };
+
+  switch(obj.pppoe.type) {
+  case 0x21:
+    this.ip4(buffer.slice(4), obj, pos + 4);
+    return;
+  case 0x57:
+    this.ip6(buffer.slice(4), obj, pos + 4);
+    return;
+  default:
+    console.log("Unknown ppp.type", obj);
+    return;
+  }
+};
+
+Pcap.prototype.mpls = function (buffer, obj, pos) {
+  let offset = 0;
+  while (offset + 5 < buffer.length) {
+    let S = buffer[3] & 0x1;
+    offset += 4;
+    if (S) {
+      switch(buffer[offset] >> 4) {
+      case 4:
+        this.ip4(buffer.slice(offset), obj, pos + offset);
+        return;
+      case 6:
+        this.ip6(buffer.slice(offset), obj, pos + offset);
+        return;
+      default:
+        console.log("Unknown mpls.type", obj, offset);
+        return;
+      }
+    }
+  }
+};
+
 Pcap.prototype.ethertype = function(buffer, obj, pos) {
   obj.ether.type = buffer.readUInt16BE(0);
 
@@ -493,6 +603,9 @@ Pcap.prototype.ethertype = function(buffer, obj, pos) {
     break;
   case 0x8864:
     this.pppoe(buffer.slice(2), obj, pos+2);
+    break;
+  case 0x8847:
+    this.mpls(buffer.slice(2), obj, pos+2);
     break;
   case 0x8100: // VLAN
     this.ethertype(buffer.slice(4), obj, pos+4);
@@ -510,6 +623,47 @@ Pcap.prototype.ether = function (buffer, obj, pos) {
     addr2:  buffer.slice(6, 12).toString('hex', 0, 6)
   };
   this.ethertype(buffer.slice(12), obj, pos+12);
+};
+
+Pcap.prototype.radiotap = function (buffer, obj, pos) {
+  var l = buffer[2] + 24;
+  if (buffer[l+6] === 0x08 && buffer[l+7] === 0x00) {
+    this.ip4(buffer.slice(l+8), obj, pos + l+8);
+  } else if (buffer[l+6] === 0x86 && buffer[l+7] === 0xdd) {
+    this.ip6(buffer.slice(l+8), obj, pos + l+8);
+  }
+};
+
+Pcap.prototype.nflog = function (buffer, obj, pos) {
+  var offset = 4;
+  while (offset + 4 < buffer.length) {
+    var length = buffer.readUInt16LE(offset);
+    if (buffer[offset+3] === 0 && buffer[offset+2] == 9) {
+      if (buffer[0] === 2)
+        return this.ip4(buffer.slice(offset+4), obj, pos + offset + 4);
+      else
+        return this.ip6(buffer.slice(offset+4), obj, pos + offset + 4);
+    } else {
+      offset += (length + 3) & 0xfffc;
+    }
+  }
+
+  var l = buffer[2] + 24;
+  if (buffer[l+6] === 0x08 && buffer[l+7] === 0x00) {
+    this.ip4(buffer.slice(l+8), obj, pos + l+8);
+  } else if (buffer[l+6] === 0x86 && buffer[l+7] === 0xdd) {
+    this.ip6(buffer.slice(l+8), obj, pos + l+8);
+  }
+};
+
+Pcap.prototype.framerelay = function (buffer, obj, pos) {
+  if (buffer[2] == 0x03 || buffer[3] == 0xcc) {
+    this.ip4(buffer.slice(4), obj, pos + 4);
+  } else if (buffer[2] == 0x08 || buffer[3] == 0x00) {
+    this.ip4(buffer.slice(4), obj, pos + 4);
+  } else if (buffer[2] == 0x86 || buffer[3] == 0xdd) {
+    this.ip6(buffer.slice(4), obj, pos + 4);
+  }
 };
 
 
@@ -532,7 +686,11 @@ Pcap.prototype.pcap = function (buffer, obj) {
 
   switch(this.linkType) {
   case 0: // NULL
-    this.ip4(buffer.slice(20, obj.pcap.incl_len + 16), obj, 20);
+    if (buffer[16] === 30) {
+      this.ip6(buffer.slice(20, obj.pcap.incl_len + 16), obj, 20);
+    } else {
+      this.ip4(buffer.slice(20, obj.pcap.incl_len + 16), obj, 20);
+    }
     break;
   case 1: // Ether
     this.ether(buffer.slice(16, obj.pcap.incl_len + 16), obj, 16);
@@ -541,8 +699,20 @@ Pcap.prototype.pcap = function (buffer, obj) {
   case 101: // RAW
     this.ip4(buffer.slice(16, obj.pcap.incl_len + 16), obj, 16);
     break;
+  case 107: // Frame Relay
+    this.framerelay(buffer.slice(16, obj.pcap.incl_len + 16), obj, 16);
+    break;
   case 113: // SLL
     this.ip4(buffer.slice(32, obj.pcap.incl_len + 16), obj, 32);
+    break;
+  case 127: // radiotap
+    this.radiotap(buffer.slice(16, obj.pcap.incl_len + 16), obj, 16);
+    break;
+  case 228: // RAW
+    this.ip4(buffer.slice(16, obj.pcap.incl_len + 16), obj, 16);
+    break;
+  case 239: // NFLOG
+    this.nflog(buffer.slice(16, obj.pcap.incl_len + 16), obj, 16);
     break;
   default:
     console.log("Unsupported pcap file", this.filename, "link type", this.linkType);
@@ -558,7 +728,7 @@ Pcap.prototype.decode = function (buffer, obj) {
 Pcap.prototype.getHeaderNg = function () {
 
   var buffer = this.readHeader();
-  var b = new Buffer(32 + 24);
+  var b = Buffer.alloc(32 + 24);
 
   b.writeUInt32LE(0x0A0D0D0A, 0);  // Block Type
   b.writeUInt32LE(32, 4);          // Block Len 1
@@ -586,9 +756,10 @@ Pcap.prototype.getHeaderNg = function () {
 //// Reassembly array of packets
 //////////////////////////////////////////////////////////////////////////////////
 
-exports.reassemble_icmp = function (packets, cb) {
+exports.reassemble_icmp = function (packets, numPackets, cb) {
   var results = [];
-  packets.forEach(function (item) {
+  packets.length = Math.min(packets.length, numPackets);
+  packets.forEach((item) => {
     var key = item.ip.addr1;
     if (results.length === 0 || key !== results[results.length-1].key) {
       var result = {
@@ -598,7 +769,7 @@ exports.reassemble_icmp = function (packets, cb) {
       };
       results.push(result);
     } else {
-      var newBuf = new Buffer(results[results.length-1].data.length + item.icmp.data.length);
+      var newBuf = Buffer.alloc(results[results.length-1].data.length + item.icmp.data.length);
       results[results.length-1].data.copy(newBuf);
       item.icmp.data.copy(newBuf, results[results.length-1].data.length);
       results[results.length-1].data = newBuf;
@@ -607,10 +778,11 @@ exports.reassemble_icmp = function (packets, cb) {
   cb(null, results);
 };
 
-exports.reassemble_udp = function (packets, cb) {
+exports.reassemble_udp = function (packets, numPackets, cb) {
   try {
   var results = [];
-  packets.forEach(function (item) {
+  packets.length = Math.min(packets.length, numPackets);
+  packets.forEach((item) => {
     var key = item.ip.addr1 + ':' + item.udp.sport;
     if (results.length === 0 || key !== results[results.length-1].key) {
       var result = {
@@ -620,7 +792,7 @@ exports.reassemble_udp = function (packets, cb) {
       };
       results.push(result);
     } else {
-      var newBuf = new Buffer(results[results.length-1].data.length + item.udp.data.length);
+      var newBuf = Buffer.alloc(results[results.length-1].data.length + item.udp.data.length);
       results[results.length-1].data.copy(newBuf);
       item.udp.data.copy(newBuf, results[results.length-1].data.length);
       results[results.length-1].data = newBuf;
@@ -632,10 +804,58 @@ exports.reassemble_udp = function (packets, cb) {
   }
 };
 
+exports.reassemble_sctp = function (packets, numPackets, cb) {
+  try {
+  var results = [];
+  packets.length = Math.min(packets.length, numPackets);
+  packets.forEach((item) => {
+    var key = item.ip.addr1 + ':' + item.sctp.sport;
+    if (results.length === 0 || key !== results[results.length-1].key) {
+      var result = {
+        key: key,
+        data: item.sctp.data,
+        ts: item.pcap.ts_sec*1000 + Math.round(item.pcap.ts_usec/1000)
+      };
+      results.push(result);
+    } else {
+      var newBuf = Buffer.alloc(results[results.length-1].data.length + item.sctp.data.length);
+      results[results.length-1].data.copy(newBuf);
+      item.sctp.data.copy(newBuf, results[results.length-1].data.length);
+      results[results.length-1].data = newBuf;
+    }
+  });
+  cb(null, results);
+  } catch (e) {
+    cb(e, results);
+  }
+};
+
+exports.reassemble_esp = function (packets, numPackets, cb) {
+  var results = [];
+  packets.length = Math.min(packets.length, numPackets);
+  packets.forEach((item) => {
+    var key = item.ip.addr1;
+    if (results.length === 0 || key !== results[results.length-1].key) {
+      var result = {
+        key: key,
+        data: item.esp.data,
+        ts: item.pcap.ts_sec*1000 + Math.round(item.pcap.ts_usec/1000)
+      };
+      results.push(result);
+    } else {
+      var newBuf = Buffer.alloc(results[results.length-1].data.length + item.esp.data.length);
+      results[results.length-1].data.copy(newBuf);
+      item.esp.data.copy(newBuf, results[results.length-1].data.length);
+      results[results.length-1].data = newBuf;
+    }
+  });
+  cb(null, results);
+};
+
 // Needs to be rewritten since its possible for packets to be
 // dropped by windowing and other things to actually be displayed allowed.
 // If multiple tcp sessions in one moloch session display can be wacky/wrong.
-exports.reassemble_tcp = function (packets, skey, cb) {
+exports.reassemble_tcp = function (packets, numPackets, skey, cb) {
   try {
 
     // Remove syn, rst, 0 length packets and figure out min/max seq number
@@ -697,7 +917,7 @@ exports.reassemble_tcp = function (packets, skey, cb) {
 
     // Sort Packets
     var clientKey = packets[0].ip.addr1 + ':' + packets[0].tcp.sport;
-    packets.sort(function(a,b) {
+    packets.sort((a,b) => {
       if ((a.ip.addr1 === b.ip.addr1) && (a.tcp.sport === b.tcp.sport)) {
         return (a.tcp.seq - b.tcp.seq);
       }
@@ -709,6 +929,9 @@ exports.reassemble_tcp = function (packets, skey, cb) {
       return (a.tcp.ack - (b.tcp.seq + b.tcp.data.length-1) );
     });
 
+    // Truncate
+    packets.length = Math.min(packets.length, numPackets);
+
     // Now divide up conversation
     var clientSeq = 0;
     var hostSeq = 0;
@@ -716,7 +939,7 @@ exports.reassemble_tcp = function (packets, skey, cb) {
     var previous = 0;
 
     var results = [];
-    packets.forEach(function (item) {
+    packets.forEach((item) => {
       var key = item.ip.addr1 + ':' + item.tcp.sport;
       if (key === clientKey) {
         if (clientSeq >= (item.tcp.seq + item.tcp.data.length)) {
@@ -740,7 +963,7 @@ exports.reassemble_tcp = function (packets, skey, cb) {
         };
         results.push(result);
       } else if (item.tcp.seq - previous > 0xffff) {
-        results.push({key: "", data: new Buffer(0), ts: item.pcap.ts_sec*1000 + Math.round(item.pcap.ts_usec/1000)});
+        results.push({key: "", data: Buffer.alloc(0), ts: item.pcap.ts_sec*1000 + Math.round(item.pcap.ts_usec/1000)});
         // Larger then max window size packets missing
         previous = start = item.tcp.seq;
         result = {
@@ -751,7 +974,7 @@ exports.reassemble_tcp = function (packets, skey, cb) {
         results.push(result);
       } else {
         previous = item.tcp.seq;
-        var newBuf = new Buffer(item.tcp.data.length + item.tcp.seq - start);
+        var newBuf = Buffer.alloc(item.tcp.data.length + item.tcp.seq - start);
         results[results.length-1].data.copy(newBuf);
         item.tcp.data.copy(newBuf, item.tcp.seq - start);
         results[results.length-1].data = newBuf;
@@ -759,10 +982,98 @@ exports.reassemble_tcp = function (packets, skey, cb) {
     });
 
     if (skey !== results[0].key) {
-      results.unshift({data: new Buffer(0), key: skey});
+      results.unshift({data: Buffer.alloc(0), key: skey});
     }
     cb(null, results);
   } catch (e) {
     cb(e, null);
+  }
+};
+
+exports.packetFlow = function (session, packets, numPackets, cb) {
+  let sKey, dKey;
+  let error = false;
+
+  packets = packets.slice(0, numPackets);
+
+  let results = packets.map((item, index) => {
+    let result = {
+      key: Pcap.key(item),
+      ts: item.pcap.ts_sec * 1000 + Math.round(item.pcap.ts_usec / 1000)
+    };
+
+    if (!sKey) {
+      sKey = Pcap.keyFromSession(session);
+      if (packets[0].ip.p !== 6) {
+        sKey = Pcap.key(packets[0]);
+      }
+    }
+
+    const match = result.key === sKey;
+    if (!dKey && !match) { dKey = result.key; }
+    result.src = match;
+
+    switch (item.ip.p) {
+      case 1:
+      case 58:
+        result.data = item.icmp.data;
+        break;
+      case 6:
+        result.data = item.tcp.data;
+        result.tcpflags = {
+          syn: item.tcp.synflag,
+          ack: item.tcp.ackflag,
+          psh: item.tcp.pshflag,
+          rst: item.tcp.rstflag,
+          fin: item.tcp.finflag,
+          urg: item.tcp.urgflag
+        };
+        break;
+      case 17:
+        result.data = item.udp.data;
+        break;
+      case 132:
+        result.data = item.sctp.data;
+        break;
+      case 50:
+        result.data = item.esp.data;
+        break;
+      default:
+        error = 'Couldn\'t decode pcap file, check viewer log';
+        break;
+    }
+
+    return result;
+  });
+
+  if (error) { return cb(error, null); }
+
+  return cb(null, results, sKey, dKey);
+};
+
+exports.key = function(packet) {
+  switch(packet.ip.p) {
+  case 6: // tcp
+    return packet.ip.addr1 + ':' + packet.tcp.sport;
+  case 17: // udp
+    return packet.ip.addr1 + ':' + packet.udp.sport;
+  case 132: // sctp
+    return packet.ip.addr1 + ':' + packet.sctp.sport;
+  default:
+    return packet.ip.addr1;
+  }
+};
+
+exports.keyFromSession = function(session) {
+  switch(session.ipProtocol) {
+  case 6: // tcp
+  case 'tcp':
+  case 17: // udp
+  case 'udp':
+  case 132: // sctp
+  case 'sctp':
+    return session.srcIp + ':' + session.srcPort;
+  default:
+    return session.srcIp;
   }
 };

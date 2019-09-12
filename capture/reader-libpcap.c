@@ -24,7 +24,7 @@
 
 extern MolochConfig_t        config;
 
-static pcap_t               *pcaps[MAX_INTERFACES];
+LOCAL  pcap_t               *pcaps[MAX_INTERFACES];
 
 /******************************************************************************/
 int reader_libpcap_stats(MolochReaderStats_t *stats)
@@ -50,7 +50,7 @@ void reader_libpcap_pcap_cb(u_char *batch, const struct pcap_pkthdr *h, const u_
 {
     if (unlikely(h->caplen != h->len)) {
         LOGEXIT("ERROR - Moloch requires full packet captures caplen: %d pktlen: %d\n"
-            "turning offloading off may fix, something like 'ethtool -K INTERFACE tx off sg off gro off gso off lro off tso off'", 
+            "See https://molo.ch/faq#moloch_requires_full_packet_captures_error",
             h->caplen, h->len);
     }
 
@@ -59,17 +59,21 @@ void reader_libpcap_pcap_cb(u_char *batch, const struct pcap_pkthdr *h, const u_
     packet->pkt           = (u_char *)bytes;
     packet->ts            = h->ts;
     packet->pktlen        = h->len;
+    packet->readerPos     = ((MolochPacketBatch_t *)batch)->readerPos;
 
     moloch_packet_batch((MolochPacketBatch_t *)batch, packet);
 }
 /******************************************************************************/
-static void *reader_libpcap_thread(gpointer pcapv)
+LOCAL void *reader_libpcap_thread(gpointer posv)
 {
-    pcap_t *pcap = pcapv;
-    LOG("THREAD %p", (gpointer)pthread_self());
+    long    pos = (long)posv;
+    pcap_t *pcap = pcaps[pos];
+    if (config.debug)
+        LOG("THREAD %p", (gpointer)pthread_self());
 
     MolochPacketBatch_t   batch;
     moloch_packet_batch_init(&batch);
+    batch.readerPos = pos;
     while (1) {
         int r = pcap_dispatch(pcap, 10000, reader_libpcap_pcap_cb, (u_char*)&batch);
         moloch_packet_batch_flush(&batch);
@@ -104,15 +108,16 @@ void reader_libpcap_start() {
             if (pcap_setfilter(pcaps[i], &bpf) == -1) {
                 LOGEXIT("ERROR - Couldn't set filter: '%s' with %s", config.bpf, pcap_geterr(pcaps[i]));
             }
+            pcap_freecode(&bpf);
         }
 
         char name[100];
         snprintf(name, sizeof(name), "moloch-pcap%d", i);
-        g_thread_new(name, &reader_libpcap_thread, (gpointer)pcaps[i]);
+        g_thread_unref(g_thread_new(name, &reader_libpcap_thread, (gpointer)(long)i));
     }
 }
 /******************************************************************************/
-void reader_libpcap_stop() 
+void reader_libpcap_stop()
 {
     int i;
     for (i = 0; i < MAX_INTERFACES && config.interface[i]; i++) {
@@ -176,9 +181,9 @@ void reader_libpcap_init(char *UNUSED(name))
     for (i = 0; i < MAX_INTERFACES && config.interface[i]; i++) {
 
 #ifdef SNF
-        pcaps[i] = pcap_open_live(config.interface[i], config.snapLen, 1, 0, errbuf);
+        pcaps[i] = pcap_open_live(config.interface[i], config.snapLen, 1, 1000, errbuf);
 #else
-        pcaps[i] = reader_libpcap_open_live(config.interface[i], config.snapLen, 1, 0, errbuf);
+        pcaps[i] = reader_libpcap_open_live(config.interface[i], config.snapLen, 1, 1000, errbuf);
 #endif
 
         if (!pcaps[i]) {
@@ -188,7 +193,7 @@ void reader_libpcap_init(char *UNUSED(name))
         pcap_setnonblock(pcaps[i], FALSE, errbuf);
     }
 
-    if (i == MAX_INTERFACES) {
+    if (i == MAX_INTERFACES && config.interface[MAX_INTERFACES]) {
         LOGEXIT("Only support up to %d interfaces", MAX_INTERFACES);
     }
 

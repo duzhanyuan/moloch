@@ -14,60 +14,70 @@
  */
 #include "moloch.h"
 
+extern MolochConfig_t        config;
+
 typedef struct {
     int ircState;
 } IRCInfo_t;
 
-static int channelsField;
-static int nickField;
+LOCAL  int channelsField;
+LOCAL  int nickField;
 
 /******************************************************************************/
-int irc_parser(MolochSession_t *session, void *uw, const unsigned char *data, int remaining, int which)
+LOCAL int irc_parser(MolochSession_t *session, void *uw, const unsigned char *data, int remaining, int which)
 {
     IRCInfo_t *irc = uw;
 
     if (which == 1)
         return 0;
 
-    while (remaining) {
+    BSB bsb;
+
+    BSB_INIT(bsb, data, remaining);
+
+    while (BSB_REMAINING(bsb)) {
         if (irc->ircState & 0x1) {
-            unsigned char *newline = memchr(data, '\n', remaining);
-            if (newline) {
+            int pos;
+            BSB_memchr(bsb, '\n', pos);
+
+            if (pos) {
                 irc->ircState &= ~ 0x1;
-                remaining -= (newline - data) +1;
-                data = newline+1;
-                while (*data == 0 && remaining > 0) { // Some irc clients have 0's after new lines
-                    remaining--;
-                    data++;
+                BSB_IMPORT_skip(bsb, pos + 1);
+                while (BSB_REMAINING(bsb) > 0 && BSB_PEEK(bsb) == 0) { // Some irc clients have 0's after new lines
+                    BSB_IMPORT_skip(bsb, 1);
                 }
             } else {
                 return 0;
             }
         }
 
-        if (remaining > 5 && memcmp("JOIN ", data, 5) == 0) {
-            const unsigned char *end = data + remaining;
-            const unsigned char *ptr = data + 5;
-
-            while (ptr < end && *ptr != ' ' && *ptr != '\r' && *ptr != '\n') {
-                ptr++;
+        if (BSB_REMAINING(bsb) > 6 && BSB_memcmp("JOIN ", bsb, 5) == 0) {
+            BSB_IMPORT_skip(bsb, 5);
+            unsigned char *start = BSB_WORK_PTR(bsb);
+            while (BSB_REMAINING(bsb) > 0 && BSB_PEEK(bsb) != ' ' && BSB_PEEK(bsb) != '\r' && BSB_PEEK(bsb) != '\n') {
+                BSB_IMPORT_skip(bsb, 1);
             }
+            unsigned char *end = BSB_WORK_PTR(bsb);
 
-            moloch_field_string_add(channelsField, session, (char*)data + 5, ptr - data - 5, TRUE);
+            if (!BSB_IS_ERROR(bsb) && start != end) {
+                moloch_field_string_add(channelsField, session, (char*)start, end - start, TRUE);
+            }
         }
 
-        if (remaining > 5 && memcmp("NICK ", data, 5) == 0) {
-            const unsigned char *end = data + remaining;
-            const unsigned char *ptr = data + 5;
-
-            while (ptr < end && *ptr != ' ' && *ptr != '\r' && *ptr != '\n') {
-                ptr++;
+        if (BSB_REMAINING(bsb) > 6 && BSB_memcmp("NICK ", bsb, 5) == 0) {
+            BSB_IMPORT_skip(bsb, 5);
+            unsigned char *start = BSB_WORK_PTR(bsb);
+            while (BSB_REMAINING(bsb) > 0 && BSB_PEEK(bsb) != ' ' && BSB_PEEK(bsb) != '\r' && BSB_PEEK(bsb) != '\n') {
+                BSB_IMPORT_skip(bsb, 1);
             }
+            unsigned char *end = BSB_WORK_PTR(bsb);
 
-            moloch_field_string_add(nickField, session, (char*)data + 5, ptr - data - 5, TRUE);
+            if (!BSB_IS_ERROR(bsb) && start != end) {
+                moloch_field_string_add(nickField, session, (char*)start, end - start, TRUE);
+            }
         }
 
-        if (remaining > 0) {
+        if (BSB_REMAINING(bsb) > 0) {
             irc->ircState |=  0x1;
         }
     }
@@ -75,14 +85,14 @@ int irc_parser(MolochSession_t *session, void *uw, const unsigned char *data, in
     return 0;
 }
 /******************************************************************************/
-void irc_free(MolochSession_t UNUSED(*session), void *uw)
+LOCAL void irc_free(MolochSession_t UNUSED(*session), void *uw)
 {
     IRCInfo_t            *irc          = uw;
 
     MOLOCH_TYPE_FREE(IRCInfo_t, irc);
 }
 /******************************************************************************/
-void irc_classify(MolochSession_t *session, const unsigned char *data, int len, int which, void *UNUSED(uw))
+LOCAL void irc_classify(MolochSession_t *session, const unsigned char *data, int len, int which, void *UNUSED(uw))
 {
     if (len < 8)
         return;
@@ -109,17 +119,17 @@ void irc_classify(MolochSession_t *session, const unsigned char *data, int len, 
 void moloch_parser_init()
 {
     nickField = moloch_field_define("irc", "termfield",
-        "irc.nick", "Nickname", "ircnck", 
-        "Nicknames set", 
-        MOLOCH_FIELD_TYPE_STR_HASH, MOLOCH_FIELD_FLAG_CNT, 
+        "irc.nick", "Nickname", "irc.nick",
+        "Nicknames set",
+        MOLOCH_FIELD_TYPE_STR_GHASH, MOLOCH_FIELD_FLAG_CNT,
         "category", "user",
-        NULL);
+        (char *)NULL);
 
     channelsField = moloch_field_define("irc", "termfield",
-        "irc.channel", "Channel", "ircch", 
-        "Channels joined",  
-        MOLOCH_FIELD_TYPE_STR_HASH, MOLOCH_FIELD_FLAG_CNT, 
-        NULL);
+        "irc.channel", "Channel", "irc.channel",
+        "Channels joined",
+        MOLOCH_FIELD_TYPE_STR_GHASH, MOLOCH_FIELD_FLAG_CNT,
+        (char *)NULL);
 
     moloch_parsers_classifier_register_tcp("irc", NULL, 0, (unsigned char*)":", 1, irc_classify);
     moloch_parsers_classifier_register_tcp("irc", NULL, 0, (unsigned char*)"NOTICE AUTH", 11, irc_classify);

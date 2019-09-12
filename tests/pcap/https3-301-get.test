@@ -1,44 +1,88 @@
 {
-   "sessions" : [
+   "sessions2" : [
       {
-         "header" : {
-            "index" : {
-               "_index" : "tests_sessions-131125",
-               "_type" : "session"
-            }
-         },
          "body" : {
-            "ipDst" : "192.30.252.130",
-            "db2" : 4208,
-            "mac1-term-cnt" : 1,
-            "tlsdstid-term" : [
-               "dddbfd5162689bb01e3f0ba158a586de9097b26cfc83599391cbb5e128d34b97"
+            "cert" : [
+               {
+                  "hash" : "db:c7:e9:0b:0d:a5:d8:8a:55:35:43:0e:eb:66:5d:07:78:59:e8:e8",
+                  "issuerCN" : [
+                     "digicert high assurance ev root ca"
+                  ],
+                  "issuerON" : [
+                     "DigiCert Inc"
+                  ],
+                  "notAfter" : 1636502400000,
+                  "notBefore" : 1194609600000,
+                  "remainingDays" : 1,
+                  "serial" : "0337b928347c60a6aec5adb1217f3860",
+                  "subjectCN" : [
+                     "digicert high assurance ev ca-1"
+                  ],
+                  "subjectON" : [
+                     "DigiCert Inc"
+                  ],
+                  "validDays" : 5114
+               },
+               {
+                  "alt" : [
+                     "github.com",
+                     "www.github.com"
+                  ],
+                  "altCnt" : 2,
+                  "hash" : "d7:12:e9:69:65:dc:f2:36:c8:74:c7:03:7d:c0:b2:24:a9:3b:d2:33",
+                  "issuerCN" : [
+                     "digicert high assurance ev ca-1"
+                  ],
+                  "issuerON" : [
+                     "DigiCert Inc"
+                  ],
+                  "notAfter" : 1441195200000,
+                  "notBefore" : 1370822400000,
+                  "remainingDays" : -1,
+                  "serial" : "047fbe2e4bde0084d2caf8e3ecfe7058",
+                  "subjectCN" : [
+                     "github.com"
+                  ],
+                  "subjectON" : [
+                     "GitHub, Inc."
+                  ],
+                  "validDays" : 814
+               }
             ],
-            "sl" : 223,
-            "portDst" : 443,
-            "mac2-term" : [
+            "certCnt" : 2,
+            "communityId" : "1:JebvFh6+fkj6uRw7LYcK388Vcy8=",
+            "dstASN" : "AS36459 GitHub, Inc.",
+            "dstBytes" : 4810,
+            "dstDataBytes" : 4208,
+            "dstGEO" : "US",
+            "dstIp" : "192.30.252.130",
+            "dstMac" : [
                "00:00:0c:07:ac:01",
                "00:0e:d6:0b:98:80"
             ],
-            "g1" : "USA",
-            "as2" : "AS36459 GitHub, Inc.",
-            "db1" : 630,
-            "tcpflags" : {
-               "psh" : 8,
-               "syn" : 1,
-               "fin" : 2,
-               "rst" : 3,
-               "syn-ack" : 1,
-               "ack" : 8,
-               "urg" : 0
-            },
-            "lpd" : 1385396821236,
-            "tlscipher-termcnt" : 1,
-            "tlscnt" : 2,
-            "fb2" : "1603010055020000",
-            "ss" : 1,
+            "dstMacCnt" : 2,
+            "dstOui" : [
+               "Cisco Systems, Inc"
+            ],
+            "dstOuiCnt" : 1,
+            "dstPackets" : 9,
+            "dstPayload8" : "1603010055020000",
+            "dstPort" : 443,
+            "dstRIR" : "ARIN",
+            "fileId" : [],
             "firstPacket" : 1385396821013,
-            "psl" : [
+            "http" : {
+               "host" : [
+                  "www.github.com"
+               ],
+               "hostCnt" : 1
+            },
+            "initRTT" : 17,
+            "ipProtocol" : 6,
+            "lastPacket" : 1385396821236,
+            "length" : 223,
+            "node" : "test",
+            "packetLen" : [
                94,
                90,
                82,
@@ -63,78 +107,7 @@
                82,
                70
             ],
-            "p2" : 443,
-            "by1" : 1530,
-            "prot-term-cnt" : 2,
-            "p1" : 62599,
-            "pr" : 6,
-            "hocnt" : 1,
-            "lastPacket" : 1385396821236,
-            "tlsver-term" : [
-               "TLSv1"
-            ],
-            "g2" : "USA",
-            "fb1" : "1603010072010000",
-            "no" : "test",
-            "by" : 6340,
-            "mac2-term-cnt" : 2,
-            "mac1-term" : [
-               "00:1f:5b:ff:51:cb"
-            ],
-            "a2" : "192.30.252.130",
-            "portSrc" : 62599,
-            "a1" : "10.180.156.141",
-            "tls" : [
-               {
-                  "sOn" : "GitHub, Inc.",
-                  "alt" : [
-                     "github.com",
-                     "www.github.com"
-                  ],
-                  "notAfter" : 1441195200,
-                  "notBefore" : 1370822400,
-                  "altcnt" : 2,
-                  "sCn" : [
-                     "github.com"
-                  ],
-                  "iOn" : "DigiCert Inc",
-                  "diffDays" : 814,
-                  "sn" : "047fbe2e4bde0084d2caf8e3ecfe7058",
-                  "hash" : "d7:12:e9:69:65:dc:f2:36:c8:74:c7:03:7d:c0:b2:24:a9:3b:d2:33",
-                  "iCn" : [
-                     "digicert high assurance ev ca-1"
-                  ]
-               },
-               {
-                  "diffDays" : 5114,
-                  "sn" : "0337b928347c60a6aec5adb1217f3860",
-                  "hash" : "db:c7:e9:0b:0d:a5:d8:8a:55:35:43:0e:eb:66:5d:07:78:59:e8:e8",
-                  "sCn" : [
-                     "digicert high assurance ev ca-1"
-                  ],
-                  "iOn" : "DigiCert Inc",
-                  "iCn" : [
-                     "digicert high assurance ev root ca"
-                  ],
-                  "sOn" : "DigiCert Inc",
-                  "notBefore" : 1194609600,
-                  "notAfter" : 1636502400
-               }
-            ],
-            "fp" : 1385396821,
-            "pa1" : 14,
-            "rir2" : "ARIN",
-            "db" : 4838,
-            "ho" : [
-               "www.github.com"
-            ],
-            "pa2" : 9,
-            "fpd" : 1385396821013,
-            "tlscipher-term" : [
-               "TLS_RSA_WITH_RC4_128_SHA"
-            ],
-            "ipSrc" : "10.180.156.141",
-            "ps" : [
+            "packetPos" : [
                24,
                118,
                208,
@@ -159,16 +132,78 @@
                6580,
                6662
             ],
-            "pa" : 23,
-            "timestamp" : "SET",
-            "by2" : 4810,
-            "lp" : 1385396821,
-            "tlsver-termcnt" : 1,
-            "prot-term" : [
+            "protocol" : [
+               "tlsrulestest",
                "tls",
                "tcp"
             ],
-            "fs" : []
+            "protocolCnt" : 3,
+            "segmentCnt" : 1,
+            "srcBytes" : 1530,
+            "srcDataBytes" : 630,
+            "srcGEO" : "US",
+            "srcIp" : "10.180.156.141",
+            "srcMac" : [
+               "00:1f:5b:ff:51:cb"
+            ],
+            "srcMacCnt" : 1,
+            "srcOui" : [
+               "Apple, Inc."
+            ],
+            "srcOuiCnt" : 1,
+            "srcPackets" : 14,
+            "srcPayload8" : "1603010072010000",
+            "srcPort" : 62599,
+            "tcpflags" : {
+               "ack" : 8,
+               "dstZero" : 0,
+               "fin" : 2,
+               "psh" : 8,
+               "rst" : 3,
+               "srcZero" : 0,
+               "syn" : 1,
+               "syn-ack" : 1,
+               "urg" : 0
+            },
+            "timestamp" : "SET",
+            "tls" : {
+               "cipher" : [
+                  "TLS_RSA_WITH_RC4_128_SHA"
+               ],
+               "cipherCnt" : 1,
+               "dstSessionId" : [
+                  "dddbfd5162689bb01e3f0ba158a586de9097b26cfc83599391cbb5e128d34b97"
+               ],
+               "ja3" : [
+                  "06a92bf69b367389d2feb0d70501ddfe"
+               ],
+               "ja3Cnt" : 1,
+               "ja3s" : [
+                  "d2e6f7ef558ea8036c7e21b163b2d1af"
+               ],
+               "ja3sCnt" : 1,
+               "ja3sstring" : [
+                  "769,5,0-65281"
+               ],
+               "ja3sstringCnt" : 1,
+               "ja3string" : [
+                  "769,57-56-53-22-19-10-51-50-47-154-153-150-5-4-21-18-9-20-17-8-6-3-255,0,,"
+               ],
+               "ja3stringCnt" : 1,
+               "version" : [
+                  "TLSv1"
+               ],
+               "versionCnt" : 1
+            },
+            "totBytes" : 6340,
+            "totDataBytes" : 4838,
+            "totPackets" : 23
+         },
+         "header" : {
+            "index" : {
+               "_index" : "tests_sessions2-131125",
+               "_type" : "session"
+            }
          }
       }
    ]

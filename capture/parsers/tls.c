@@ -20,8 +20,12 @@ LOCAL  int                   certsField;
 LOCAL  int                   hostField;
 LOCAL  int                   verField;
 LOCAL  int                   cipherField;
+LOCAL  int                   ja3Field;
+LOCAL  int                   ja3sField;
 LOCAL  int                   srcIdField;
 LOCAL  int                   dstIdField;
+LOCAL  int                   ja3StrField;
+LOCAL  int                   ja3sStrField;
 
 typedef struct {
     unsigned char       buf[8192];
@@ -34,8 +38,7 @@ extern unsigned char    moloch_char_to_hexstr[256][3];
 LOCAL GChecksum *checksums[MOLOCH_MAX_PACKET_THREADS];
 
 /******************************************************************************/
-void
-tls_certinfo_process(MolochCertInfo_t *ci, BSB *bsb)
+LOCAL void tls_certinfo_process(MolochCertInfo_t *ci, BSB *bsb)
 {
     uint32_t apc, atag, alen;
     char lastOid[1000];
@@ -58,7 +61,7 @@ tls_certinfo_process(MolochCertInfo_t *ci, BSB *bsb)
              * 12 == BER_UNI_TAG_UTF8String
              */
             if (strcmp(lastOid, "2.5.4.3") == 0) {
-                MolochString_t *element = MOLOCH_TYPE_ALLOC(MolochString_t);
+                MolochString_t *element = MOLOCH_TYPE_ALLOC0(MolochString_t);
                 element->utf8 = atag == 12;
                 if (element->utf8)
                     element->str = g_utf8_strdown((char*)value, alen);
@@ -66,19 +69,28 @@ tls_certinfo_process(MolochCertInfo_t *ci, BSB *bsb)
                     element->str = g_ascii_strdown((char*)value, alen);
                 DLL_PUSH_TAIL(s_, &ci->commonName, element);
             } else if (strcmp(lastOid, "2.5.4.10") == 0) {
-                if (ci->orgName) {
-                    LOG("Multiple orgName %s => %.*s", ci->orgName, alen, value);
-                    free(ci->orgName);
-                }
-                ci->orgUtf8 = atag == 12;
-                ci->orgName = g_strndup((char*)value, alen);
+                MolochString_t *element = MOLOCH_TYPE_ALLOC0(MolochString_t);
+                element->utf8 = atag == 12;
+                element->str = g_strndup((char*)value, alen);
+                DLL_PUSH_TAIL(s_, &ci->orgName, element);
             }
         }
     }
 }
 /******************************************************************************/
-void
-tls_alt_names(MolochCertsInfo_t *certs, BSB *bsb, char *lastOid)
+LOCAL void tls_key_usage (MolochCertsInfo_t *certs, BSB *bsb)
+{
+    uint32_t apc, atag, alen;
+
+    while (BSB_REMAINING(*bsb) >= 2) {
+        unsigned char *value = moloch_parsers_asn_get_tlv(bsb, &apc, &atag, &alen);
+
+        if (value && atag == 4 && alen == 4)
+            certs->isCA = (value[3] & 0x02);
+    }
+}
+/******************************************************************************/
+LOCAL void tls_alt_names(MolochCertsInfo_t *certs, BSB *bsb, char *lastOid)
 {
     uint32_t apc, atag, alen;
 
@@ -97,6 +109,9 @@ tls_alt_names(MolochCertsInfo_t *certs, BSB *bsb, char *lastOid)
             }
         } else if (atag == 6)  {
             moloch_parsers_asn_decode_oid(lastOid, 100, value, alen);
+            if (strcmp(lastOid, "2.5.29.15") == 0) {
+                tls_key_usage(certs, bsb);
+            }
             if (strcmp(lastOid, "2.5.29.17") != 0)
                 lastOid[0] = 0;
         } else if (lastOid[0] && atag == 4) {
@@ -108,6 +123,7 @@ tls_alt_names(MolochCertsInfo_t *certs, BSB *bsb, char *lastOid)
             MolochString_t *element = MOLOCH_TYPE_ALLOC0(MolochString_t);
             element->str = g_ascii_strdown((char*)value, alen);
             element->len = alen;
+            element->utf8 = 1;
             DLL_PUSH_TAIL(s_, &certs->alt, element);
         }
     }
@@ -115,21 +131,22 @@ tls_alt_names(MolochCertsInfo_t *certs, BSB *bsb, char *lastOid)
     return;
 }
 /******************************************************************************/
-void tls_process_server_hello(MolochSession_t *session, const unsigned char *data, int len)
+// https://tools.ietf.org/html/draft-davidben-tls-grease-00
+LOCAL int tls_is_grease_value(uint32_t val)
 {
-    BSB bsb;
-    BSB_INIT(bsb, data, len);
+    if ((val & 0x0f) != 0x0a)
+        return 0;
 
-    uint16_t ver = 0;
-    BSB_IMPORT_u16(bsb, ver);
-    BSB_IMPORT_skip(bsb, 32);     // Random
+    if ((val & 0xff) != ((val >> 8) & 0xff))
+        return 0;
 
-    if(BSB_IS_ERROR(bsb))
-        return;
-
+    return 1;
+}
+/******************************************************************************/
+LOCAL void tls_session_version(MolochSession_t *session, uint16_t ver)
+{
     char str[100];
 
-    /* Parse SSL/TLS version */
     switch (ver) {
     case 0x0300:
         moloch_field_string_add(verField, session, "SSLv3", 5, TRUE);
@@ -154,6 +171,28 @@ void tls_process_server_hello(MolochSession_t *session, const unsigned char *dat
         snprintf(str, sizeof(str), "0x%04x", ver);
         moloch_field_string_add(verField, session, str, 6, TRUE);
     }
+}
+/******************************************************************************/
+LOCAL void tls_process_server_hello(MolochSession_t *session, const unsigned char *data, int len)
+{
+    BSB bsb;
+    BSB_INIT(bsb, data, len);
+
+    uint16_t ver = 0;
+    BSB_IMPORT_u16(bsb, ver);
+    BSB_IMPORT_skip(bsb, 32);     // Random
+
+    if(BSB_IS_ERROR(bsb))
+        return;
+
+    char str[100];
+    int  add12Later = FALSE;
+
+    // If ver is 0x303 that means there should be an extended header with actual version
+    if (ver != 0x0303)
+        tls_session_version(session, ver);
+    else
+        add12Later = TRUE;
 
     /* Parse sessionid, only for SSLv3 - TLSv1.2 */
     if (ver >= 0x0300 && ver <= 0x0303) {
@@ -184,94 +223,73 @@ void tls_process_server_hello(MolochSession_t *session, const unsigned char *dat
         snprintf(str, sizeof(str), "0x%04x", cipher);
         moloch_field_string_add(cipherField, session, str, 6, TRUE);
     }
-}
 
-#define char2num(ch) (isdigit(ch)?((ch) - '0'):0)
-#define str2num(str) (char2num((str)[0]) * 10 + char2num((str)[1]))
-#define str4num(str) (char2num((str)[0]) * 1000 + char2num((str)[1]) * 100 + char2num((str)[2]) * 10 + char2num((str)[3]))
+    BSB_IMPORT_skip(bsb, 1);
 
-/******************************************************************************/
-uint64_t tls_parse_time(MolochSession_t *session, int tag, unsigned char* value, int len)
-{
-    int        offset = 0;
-    int        pos = 0;
-    struct tm  tm;
-    time_t     val;
 
-    //UTCTime
-    if (tag == 23 && len > 12) {
-        if (len > 17 && value[12] != 'Z')
-            offset = str2num(value+13) * 60 + str2num(value+15);
+    char ja3[30000];
+    BSB ja3bsb;
+    char eja3[10000];
+    BSB eja3bsb;
 
-        if (value[12] == '-')
-            offset = -offset;
+    BSB_INIT(ja3bsb, ja3, sizeof(ja3));
+    BSB_INIT(eja3bsb, eja3, sizeof(eja3));
 
-        tm.tm_year = str2num(value+0);
-        tm.tm_mon  = str2num(value+2) - 1;
-        tm.tm_mday = str2num(value+4);
-        tm.tm_hour = str2num(value+6);
-        tm.tm_min  = str2num(value+8);
-        tm.tm_sec  = str2num(value+10);
+    if (BSB_REMAINING(bsb) > 2) {
+        int etotlen = 0;
+        BSB_IMPORT_u16(bsb, etotlen);  // Extensions Length
 
-        if (tm.tm_year < 50)
-            tm.tm_year += 100;
+        etotlen = MIN(etotlen, BSB_REMAINING(bsb));
 
-        val = timegm(&tm) + offset;
-        if (val < 0) {
-            val = 0;
-            moloch_session_add_tag(session, "cert:pre-epoch-time");
-        }
-        return val;
-    }
-    //GeneralizedTime
-    else if (tag == 24 && len >= 10) {
-        memset(&tm, 0, sizeof(tm));
-        tm.tm_year = str4num(value+0) - 1900;
-        tm.tm_mon  = str2num(value+4) - 1;
-        tm.tm_mday = str2num(value+6);
-        tm.tm_hour = str2num(value+8);
-        if (len < 10 || value[10] == 'Z' || value[10] == '+' || value[10] == '-') {
-            pos = 10;
-            goto gtdone;
-        }
-        tm.tm_min  = str2num(value+10);
-        if (len < 12 || value[12] == 'Z' || value[12] == '+' || value[12] == '-') {
-            pos = 12;
-            goto gtdone;
-        }
-        tm.tm_sec  = str2num(value+12);
-        if (len < 14 || value[14] == 'Z' || value[14] == '+' || value[14] == '-') {
-            pos = 14;
-            goto gtdone;
-        }
-        if (value[14] == '.') {
-            pos = 18;
-        } else {
-            pos = 14;
-        }
-    gtdone:
-        if (pos == len) {
-            val = mktime(&tm);
-        } else {
-            if (pos + 5 < len && (value[pos] == '+' || value[pos] == '-')) {
-                offset = str2num(value+pos+1) * 60 +  str2num(value+pos+3);
+        BSB ebsb;
+        BSB_INIT(ebsb, BSB_WORK_PTR(bsb), etotlen);
 
-                if (value[pos] == '-')
-                    offset = -offset;
+        while (BSB_REMAINING(ebsb) > 0) {
+            int etype = 0, elen = 0;
+
+            BSB_IMPORT_u16 (ebsb, etype);
+            BSB_IMPORT_u16 (ebsb, elen);
+
+            BSB_EXPORT_sprintf(eja3bsb, "%d-", etype);
+
+            if (elen > BSB_REMAINING(ebsb))
+                break;
+
+            if (etype == 0x2b && elen == 2) { // etype 0x2b is supported version
+                uint16_t supported_version = 0;
+                BSB_IMPORT_u16(ebsb, supported_version);
+
+                if (supported_version == 0x0304) {
+                    tls_session_version(session, supported_version);
+                    add12Later = FALSE;
+                }
             }
-            val = timegm(&tm) + offset;
-        }
 
-        if (val < 0) {
-            val = 0;
-            moloch_session_add_tag(session, "cert:pre-epoch-time");
+            BSB_IMPORT_skip (ebsb, elen);
         }
-        return val;
+        BSB_EXPORT_rewind(eja3bsb, 1); // Remove last -
     }
-    return 0;
+
+    if (add12Later)
+        tls_session_version(session, 0x303);
+
+    BSB_EXPORT_sprintf(ja3bsb, "%d,%d,%.*s", ver, cipher, (int)BSB_LENGTH(eja3bsb), eja3);
+
+    if (config.ja3Strings) {
+        moloch_field_string_add(ja3sStrField, session, ja3, strlen(ja3), TRUE);
+    }
+
+    gchar *md5 = g_compute_checksum_for_data(G_CHECKSUM_MD5, (guchar *)ja3, BSB_LENGTH(ja3bsb));
+    if (config.debug > 1) {
+        LOG("JA3s: %s => %s", ja3, md5);
+    }
+    if (!moloch_field_string_add(ja3sField, session, md5, 32, FALSE)) {
+        g_free(md5);
+    }
 }
+
 /******************************************************************************/
-void tls_process_server_certificate(MolochSession_t *session, const unsigned char *data, int len)
+LOCAL void tls_process_server_certificate(MolochSession_t *session, const unsigned char *data, int len)
 {
 
     BSB cbsb;
@@ -291,7 +309,9 @@ void tls_process_server_certificate(MolochSession_t *session, const unsigned cha
         MolochCertsInfo_t *certs = MOLOCH_TYPE_ALLOC0(MolochCertsInfo_t);
         DLL_INIT(s_, &certs->alt);
         DLL_INIT(s_, &certs->subject.commonName);
+        DLL_INIT(s_, &certs->subject.orgName);
         DLL_INIT(s_, &certs->issuer.commonName);
+        DLL_INIT(s_, &certs->issuer.orgName);
 
         uint32_t       atag, alen, apc;
         unsigned char *value;
@@ -355,11 +375,11 @@ void tls_process_server_certificate(MolochSession_t *session, const unsigned cha
         BSB_INIT(tbsb, value, alen);
         if (!(value = moloch_parsers_asn_get_tlv(&tbsb, &apc, &atag, &alen)))
             {badreason = 7; goto bad_cert;}
-        certs->notBefore = tls_parse_time(session, atag, value, alen);
+        certs->notBefore = moloch_parsers_asn_parse_time(session, atag, value, alen);
 
         if (!(value = moloch_parsers_asn_get_tlv(&tbsb, &apc, &atag, &alen)))
             {badreason = 7; goto bad_cert;}
-        certs->notAfter = tls_parse_time(session, atag, value, alen);
+        certs->notAfter = moloch_parsers_asn_parse_time(session, atag, value, alen);
 
         /* subject */
         if (!(value = moloch_parsers_asn_get_tlv(&bsb, &apc, &atag, &alen)))
@@ -375,12 +395,24 @@ void tls_process_server_certificate(MolochSession_t *session, const unsigned cha
         if (BSB_REMAINING(bsb)) {
             if (!(value = moloch_parsers_asn_get_tlv(&bsb, &apc, &atag, &alen)))
                 {badreason = 10; goto bad_cert;}
-            BSB tbsb;
             BSB_INIT(tbsb, value, alen);
             char lastOid[100];
             lastOid[0] = 0;
             tls_alt_names(certs, &tbsb, lastOid);
         }
+
+        // no previous certs AND not a CA AND either no orgName or the same orgName AND the same 1 commonName
+        if (!session->fields[certsField] &&
+            !certs->isCA &&
+            ((certs->subject.orgName.s_count == 1 && certs->issuer.orgName.s_count == 1 && strcmp(certs->subject.orgName.s_next->str, certs->issuer.orgName.s_next->str) == 0) ||
+             (certs->subject.orgName.s_count == 0 && certs->issuer.orgName.s_count == 0)) &&
+            certs->subject.commonName.s_count == 1 &&
+            certs->issuer.commonName.s_count == 1 &&
+            strcmp(certs->subject.commonName.s_next->str, certs->issuer.commonName.s_next->str) == 0) {
+
+            moloch_session_add_tag(session, "cert:self-signed");
+        }
+
 
         if (!moloch_field_certsinfo_add(certsField, session, certs, clen*2)) {
             moloch_field_certsinfo_free(certs);
@@ -401,8 +433,7 @@ void tls_process_server_certificate(MolochSession_t *session, const unsigned cha
 /* @data the data inside the record layer
  * @len  the length of data inside record layer
  */
-int
-tls_process_server_handshake_record(MolochSession_t *session, const unsigned char *data, int len)
+LOCAL int tls_process_server_handshake_record(MolochSession_t *session, const unsigned char *data, int len)
 {
     BSB rbsb;
 
@@ -428,16 +459,28 @@ tls_process_server_handshake_record(MolochSession_t *session, const unsigned cha
     return 0;
 }
 /******************************************************************************/
-void
-tls_process_client(MolochSession_t *session, const unsigned char *data, int len)
+LOCAL void tls_process_client(MolochSession_t *session, const unsigned char *data, int len)
 {
     BSB sslbsb;
+    char ja3[30000];
+    BSB ja3bsb;
+    char ecfja3[1000];
+    BSB ecfja3bsb;
+    char eja3[10000];
+    BSB eja3bsb;
+    char ecja3[10000];
+    BSB ecja3bsb;
 
     BSB_INIT(sslbsb, data, len);
+    BSB_INIT(ja3bsb, ja3, sizeof(ja3));
+    BSB_INIT(ecja3bsb, ecja3, sizeof(ecja3));
+    BSB_INIT(ecfja3bsb, ecfja3, sizeof(ecfja3));
+    BSB_INIT(eja3bsb, eja3, sizeof(eja3));
 
     if (BSB_REMAINING(sslbsb) > 5) {
         unsigned char *ssldata = BSB_WORK_PTR(sslbsb);
         int            ssllen = MIN(BSB_REMAINING(sslbsb) - 5, ssldata[3] << 8 | ssldata[4]);
+
 
         BSB pbsb;
         BSB_INIT(pbsb, ssldata+5, ssllen);
@@ -445,6 +488,12 @@ tls_process_client(MolochSession_t *session, const unsigned char *data, int len)
         if (BSB_REMAINING(pbsb) > 7) {
             unsigned char *pdata = BSB_WORK_PTR(pbsb);
             int            plen = MIN(BSB_REMAINING(pbsb) - 4, pdata[2] << 8 | pdata[3]);
+
+            uint16_t ver = 0;
+            BSB_IMPORT_skip(pbsb, 4); // type + len
+            BSB_IMPORT_u16(pbsb, ver);
+
+            BSB_EXPORT_sprintf(ja3bsb, "%d,", ver);
 
             BSB cbsb;
             BSB_INIT(cbsb, pdata+6, plen-2); // The - 4 for plen is done above, confusing
@@ -469,12 +518,21 @@ tls_process_client(MolochSession_t *session, const unsigned char *data, int len)
                 BSB_IMPORT_skip(cbsb, skiplen);  // Session Id
 
                 BSB_IMPORT_u16(cbsb, skiplen);   // Ciper Suites Length
-                BSB_IMPORT_skip(cbsb, skiplen);  // Ciper Suites
+                while (skiplen > 0) {
+                    uint16_t c = 0;
+                    BSB_IMPORT_u16(cbsb, c);
+                    if (!tls_is_grease_value(c)) {
+                        BSB_EXPORT_sprintf(ja3bsb, "%d-", c);
+                    }
+                    skiplen -= 2;
+                }
+                BSB_EXPORT_rewind(ja3bsb, 1); // Remove last -
+                BSB_EXPORT_u08(ja3bsb, ',');
 
                 BSB_IMPORT_u08(cbsb, skiplen);   // Compression Length
                 BSB_IMPORT_skip(cbsb, skiplen);  // Compressions
 
-                if (BSB_REMAINING(cbsb) > 2) {
+                if (BSB_REMAINING(cbsb) > 6) {
                     int etotlen = 0;
                     BSB_IMPORT_u16(cbsb, etotlen);  // Extensions Length
 
@@ -483,48 +541,98 @@ tls_process_client(MolochSession_t *session, const unsigned char *data, int len)
                     BSB ebsb;
                     BSB_INIT(ebsb, BSB_WORK_PTR(cbsb), etotlen);
 
-                    while (BSB_REMAINING(ebsb) > 0) {
-                        int etype = 0, elen = 0;
+                    while (BSB_REMAINING(ebsb) > 4) {
+                        uint16_t etype = 0, elen = 0;
 
                         BSB_IMPORT_u16 (ebsb, etype);
                         BSB_IMPORT_u16 (ebsb, elen);
-                        if (etype != 0) {
-                            BSB_IMPORT_skip (ebsb, elen);
-                            continue;
-                        }
+
+                        if (!tls_is_grease_value(etype))
+                            BSB_EXPORT_sprintf(eja3bsb, "%d-", etype);
 
                         if (elen > BSB_REMAINING(ebsb))
                             break;
 
-                        BSB snibsb;
-                        BSB_INIT(snibsb, BSB_WORK_PTR(ebsb), elen);
-                        BSB_IMPORT_skip (ebsb, elen);
+                        if (etype == 0) { // SNI
+                            BSB snibsb;
+                            BSB_INIT(snibsb, BSB_WORK_PTR(ebsb), elen);
+                            BSB_IMPORT_skip (ebsb, elen);
 
-                        int sni = 0;
-                        BSB_IMPORT_u16(snibsb, sni); // list len
-                        if (sni != BSB_REMAINING(snibsb))
-                            continue;
+                            int sni = 0;
+                            BSB_IMPORT_u16(snibsb, sni); // list len
+                            if (sni != BSB_REMAINING(snibsb))
+                                continue;
 
-                        BSB_IMPORT_u08(snibsb, sni); // type
-                        if (sni != 0)
-                            continue;
+                            BSB_IMPORT_u08(snibsb, sni); // type
+                            if (sni != 0)
+                                continue;
 
-                        BSB_IMPORT_u16(snibsb, sni); // len
-                        if (sni != BSB_REMAINING(snibsb))
-                            continue;
+                            BSB_IMPORT_u16(snibsb, sni); // len
+                            if (sni != BSB_REMAINING(snibsb))
+                                continue;
 
-                        moloch_field_string_add(hostField, session, (char *)BSB_WORK_PTR(snibsb), sni, TRUE);
+                            moloch_field_string_add(hostField, session, (char *)BSB_WORK_PTR(snibsb), sni, TRUE);
+                        } else if (etype == 0x000a) { // Elliptic Curves
+                            BSB bsb;
+                            BSB_INIT(bsb, BSB_WORK_PTR(ebsb), elen);
+                            BSB_IMPORT_skip (ebsb, elen);
+
+                            uint16_t len = 0;
+                            BSB_IMPORT_u16(bsb, len); // list len
+                            while (len > 0 && !BSB_IS_ERROR(bsb)) {
+                                uint16_t c = 0;
+                                BSB_IMPORT_u16(bsb, c);
+                                if (!tls_is_grease_value(c)) {
+                                    BSB_EXPORT_sprintf(ecja3bsb, "%d-", c);
+                                }
+                                len -= 2;
+                            }
+                            BSB_EXPORT_rewind(ecja3bsb, 1); // Remove last -
+                        } else if (etype == 0x000b) { // Elliptic Curves point formats
+                            BSB bsb;
+                            BSB_INIT(bsb, BSB_WORK_PTR(ebsb), elen);
+                            BSB_IMPORT_skip (ebsb, elen);
+
+                            uint16_t len = 0;
+                            BSB_IMPORT_u08(bsb, len); // list len
+                            while (len > 0 && !BSB_IS_ERROR(bsb)) {
+                                uint8_t c = 0;
+                                BSB_IMPORT_u08(bsb, c);
+                                BSB_EXPORT_sprintf(ecfja3bsb, "%d-", c);
+                                len -= 1;
+                            }
+                            BSB_EXPORT_rewind(ecfja3bsb, 1); // Remove last -
+                        } else {
+                            BSB_IMPORT_skip (ebsb, elen);
+                        }
                     }
+                    BSB_EXPORT_rewind(eja3bsb, 1); // Remove last -
                 }
             }
         }
-
         BSB_IMPORT_skip(sslbsb, ssllen + 5);
+
+        if (BSB_NOT_ERROR(ja3bsb) && BSB_NOT_ERROR(ecja3bsb) && BSB_NOT_ERROR(eja3bsb)) {
+            BSB_EXPORT_sprintf(ja3bsb, "%.*s,%.*s,%.*s", (int)BSB_LENGTH(eja3bsb), eja3, (int)BSB_LENGTH(ecja3bsb), ecja3, (int)BSB_LENGTH(ecfja3bsb), ecfja3);
+
+            if (config.ja3Strings) {
+                moloch_field_string_add(ja3StrField, session, ja3, strlen(ja3), TRUE);
+            }
+
+            gchar *md5 = g_compute_checksum_for_data(G_CHECKSUM_MD5, (guchar *)ja3, BSB_LENGTH(ja3bsb));
+
+            if (config.debug > 1) {
+                LOG("JA3: %s => %s", ja3, md5);
+            }
+            if (!moloch_field_string_add(ja3Field, session, md5, 32, FALSE)) {
+                g_free(md5);
+            }
+        }
     }
 }
 
 /******************************************************************************/
-int tls_parser(MolochSession_t *session, void *uw, const unsigned char *data, int remaining, int which)
+LOCAL int tls_parser(MolochSession_t *session, void *uw, const unsigned char *data, int remaining, int which)
 {
     TLSInfo_t            *tls          = uw;
 
@@ -568,7 +676,7 @@ int tls_parser(MolochSession_t *session, void *uw, const unsigned char *data, in
     return 0;
 }
 /******************************************************************************/
-void tls_save(MolochSession_t *session, void *uw, int UNUSED(final))
+LOCAL void tls_save(MolochSession_t *session, void *uw, int UNUSED(final))
 {
     TLSInfo_t            *tls          = uw;
 
@@ -578,14 +686,14 @@ void tls_save(MolochSession_t *session, void *uw, int UNUSED(final))
     }
 }
 /******************************************************************************/
-void tls_free(MolochSession_t *UNUSED(session), void *uw)
+LOCAL void tls_free(MolochSession_t *UNUSED(session), void *uw)
 {
     TLSInfo_t            *tls          = uw;
 
     MOLOCH_TYPE_FREE(TLSInfo_t, tls);
 }
 /******************************************************************************/
-void tls_classify(MolochSession_t *session, const unsigned char *data, int len, int which, void *UNUSED(uw))
+LOCAL void tls_classify(MolochSession_t *session, const unsigned char *data, int len, int which, void *UNUSED(uw))
 {
     if (len < 6 || data[2] > 0x03)
         return;
@@ -619,115 +727,141 @@ void tls_classify(MolochSession_t *session, const unsigned char *data, int len, 
 void moloch_parser_init()
 {
     certsField = moloch_field_define("cert", "notreal",
-        "cert", "tls", "tls",
+        "cert", "cert", "cert",
         "CERT Info",
         MOLOCH_FIELD_TYPE_CERTSINFO,  MOLOCH_FIELD_FLAG_CNT | MOLOCH_FIELD_FLAG_NODB,
-        NULL);
+        (char *)NULL);
 
     moloch_field_define("cert", "integer",
-        "cert.cnt", "Cert Cnt", "tlscnt",
+        "cert.cnt", "Cert Cnt", "certCnt",
         "Count of certificates",
         0, MOLOCH_FIELD_FLAG_FAKE,
-        NULL);
+        (char *)NULL);
 
     moloch_field_define("cert", "lotermfield",
-        "cert.alt", "Alt Name", "tls.alt",
+        "cert.alt", "Alt Name", "cert.alt",
         "Certificate alternative names",
         0,  MOLOCH_FIELD_FLAG_CNT | MOLOCH_FIELD_FLAG_FAKE,
-        NULL);
+        (char *)NULL);
 
     moloch_field_define("cert", "lotermfield",
-        "cert.serial", "Serial Number", "tls.sn",
+        "cert.serial", "Serial Number", "cert.serial",
         "Serial Number",
         0, MOLOCH_FIELD_FLAG_FAKE,
-        NULL);
+        (char *)NULL);
 
     moloch_field_define("cert", "lotermfield",
-        "cert.issuer.cn", "Issuer CN", "tls.iCn",
+        "cert.issuer.cn", "Issuer CN", "cert.issuerCN",
         "Issuer's common name",
         0, MOLOCH_FIELD_FLAG_FAKE,
-        NULL);
+        (char *)NULL);
 
     moloch_field_define("cert", "lotermfield",
-        "cert.subject.cn", "Subject CN", "tls.sCn",
+        "cert.subject.cn", "Subject CN", "cert.subjectCN",
         "Subject's common name",
         0, MOLOCH_FIELD_FLAG_FAKE,
-        NULL);
+        (char *)NULL);
 
-    moloch_field_define("cert", "lotextfield",
-        "cert.issuer.on", "Issuer ON", "tls.iOn",
+    moloch_field_define("cert", "termfield",
+        "cert.issuer.on", "Issuer ON", "cert.issuerON",
         "Issuer's organization name",
         0, MOLOCH_FIELD_FLAG_FAKE,
-        "rawField", "rawiOn",
-        NULL);
+        (char *)NULL);
 
-    moloch_field_define("cert", "lotextfield",
-        "cert.subject.on", "Subject ON", "tls.sOn",
+    moloch_field_define("cert", "termfield",
+        "cert.subject.on", "Subject ON", "cert.subjectON",
         "Subject's organization name",
         0, MOLOCH_FIELD_FLAG_FAKE,
-        "rawField", "rawsOn",
-        NULL);
+        (char *)NULL);
 
-    moloch_field_define("cert", "lotextfield",
-        "cert.hash", "Hash", "tls.hash",
+    moloch_field_define("cert", "lotermfield",
+        "cert.hash", "Hash", "cert.hash",
         "SHA1 hash of entire certificate",
         0, MOLOCH_FIELD_FLAG_FAKE,
-        NULL);
+        (char *)NULL);
 
-    moloch_field_define("cert", "seconds",
-        "cert.notbefore", "Not Before", "tls.notBefore",
+    moloch_field_define("cert", "date",
+        "cert.notbefore", "Not Before", "cert.notBefore",
         "Certificate is not valid before this date",
         0, MOLOCH_FIELD_FLAG_FAKE,
-        NULL);
+        (char *)NULL);
 
-    moloch_field_define("cert", "seconds",
-        "cert.notafter", "Not After", "tls.notAfter",
+    moloch_field_define("cert", "date",
+        "cert.notafter", "Not After", "cert.notAfter",
         "Certificate is not valid after this date",
         0, MOLOCH_FIELD_FLAG_FAKE,
-        NULL);
+        (char *)NULL);
 
     moloch_field_define("cert", "integer",
-        "cert.validfor", "Days Valid For", "tls.diffDays",
-        "Certificate is valid for this may days",
+        "cert.validfor", "Days Valid For", "cert.validDays",
+        "Certificate is valid for this many days total",
         0, MOLOCH_FIELD_FLAG_FAKE,
-        NULL);
+        (char *)NULL);
 
-    hostField = moloch_field_define("http", "lotermfield",
-        "host.http", "Hostname", "ho", 
-        "HTTP host header field", 
-        MOLOCH_FIELD_TYPE_STR_HASH,  MOLOCH_FIELD_FLAG_CNT, 
-        "aliases", "[\"http.host\"]", NULL);
+    moloch_field_define("cert", "integer",
+        "cert.remainingDays", "Days remaining", "cert.remainingDays",
+        "Certificate is still valid for this many days",
+        0, MOLOCH_FIELD_FLAG_FAKE,
+        (char *)NULL);
+
+    hostField = moloch_field_by_exp("host.http");
 
     verField = moloch_field_define("tls", "termfield",
-        "tls.version", "Version", "tlsver-term", 
-        "SSL/TLS version field", 
-        MOLOCH_FIELD_TYPE_STR_HASH,  MOLOCH_FIELD_FLAG_CNT, 
-        NULL);
+        "tls.version", "Version", "tls.version",
+        "SSL/TLS version field",
+        MOLOCH_FIELD_TYPE_STR_GHASH,  MOLOCH_FIELD_FLAG_CNT,
+        (char *)NULL);
 
     cipherField = moloch_field_define("tls", "uptermfield",
-        "tls.cipher", "Cipher", "tlscipher-term", 
-        "SSL/TLS cipher field", 
-        MOLOCH_FIELD_TYPE_STR_HASH,  MOLOCH_FIELD_FLAG_CNT, 
-        NULL);
+        "tls.cipher", "Cipher", "tls.cipher",
+        "SSL/TLS cipher field",
+        MOLOCH_FIELD_TYPE_STR_GHASH,  MOLOCH_FIELD_FLAG_CNT,
+        (char *)NULL);
+
+    ja3Field = moloch_field_define("tls", "lotermfield",
+        "tls.ja3", "JA3", "tls.ja3",
+        "SSL/TLS JA3 field",
+        MOLOCH_FIELD_TYPE_STR_GHASH,  MOLOCH_FIELD_FLAG_CNT,
+        (char *)NULL);
+
+    ja3sField = moloch_field_define("tls", "lotermfield",
+        "tls.ja3s", "JA3S", "tls.ja3s",
+        "SSL/TLS JA3S field",
+        MOLOCH_FIELD_TYPE_STR_GHASH,  MOLOCH_FIELD_FLAG_CNT,
+        (char *)NULL);
 
     dstIdField = moloch_field_define("tls", "lotermfield",
-        "tls.sessionid.dst", "Dst Session Id", "tlsdstid-term", 
-        "SSL/TLS Dst Session Id", 
-        MOLOCH_FIELD_TYPE_STR_HASH,  0, 
-        NULL);
+        "tls.sessionid.dst", "Dst Session Id", "tls.dstSessionId",
+        "SSL/TLS Dst Session Id",
+        MOLOCH_FIELD_TYPE_STR_GHASH,  0,
+        (char *)NULL);
 
     srcIdField = moloch_field_define("tls", "lotermfield",
-        "tls.sessionid.src", "Src Session Id", "tlssrcid-term", 
-        "SSL/TLS Src Session Id", 
-        MOLOCH_FIELD_TYPE_STR_HASH,  0, 
-        NULL);
+        "tls.sessionid.src", "Src Session Id", "tls.srcSessionId",
+        "SSL/TLS Src Session Id",
+        MOLOCH_FIELD_TYPE_STR_GHASH,  0,
+        (char *)NULL);
 
     moloch_field_define("general", "lotermfield",
         "tls.sessionid", "Src or Dst Session Id", "tlsidall",
         "Shorthand for tls.sessionid.src or tls.sessionid.dst",
         0,  MOLOCH_FIELD_FLAG_FAKE,
         "regex", "^tls\\\\.sessionid\\\\.(?:(?!\\\\.cnt$).)*$",
-        NULL);
+        (char *)NULL);
+
+    if (config.ja3Strings) {
+        ja3sStrField = moloch_field_define("tls","lotermfield",
+            "tls.ja3sstring", "JA3SSTR", "tls.ja3sstring",
+            "SSL/TLS JA3S String field",
+            MOLOCH_FIELD_TYPE_STR_GHASH, MOLOCH_FIELD_FLAG_CNT,
+            (char *)NULL);
+
+        ja3StrField = moloch_field_define("tls","lotermfield",
+            "tls.ja3string", "JA3STR", "tls.ja3string",
+            "SSL/TLS JA3 String field",
+            MOLOCH_FIELD_TYPE_STR_GHASH, MOLOCH_FIELD_FLAG_CNT,
+            (char *)NULL);
+    }
 
     moloch_parsers_classifier_register_tcp("tls", NULL, 0, (unsigned char*)"\x16\x03", 2, tls_classify);
 

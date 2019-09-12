@@ -37,15 +37,16 @@ extern MolochConfig_t        config;
 
 extern void                 *esServer;
 
-static int                   tagsField;
-static int                   httpHostField;
-static int                   httpXffField;
-static int                   httpMd5Field;
-static int                   httpPathField;
-static int                   emailMd5Field;
-static int                   emailSrcField;
-static int                   emailDstField;
-static int                   dnsHostField;
+LOCAL  int                   tagsField;
+LOCAL  int                   httpHostField;
+LOCAL  int                   httpXffField;
+LOCAL  int                   httpMd5Field;
+LOCAL  int                   httpPathField;
+LOCAL  int                   emailMd5Field;
+LOCAL  int                   emailSrcField;
+LOCAL  int                   emailDstField;
+LOCAL  int                   dnsHostField;
+LOCAL  int                   dnsMailServerField;
 
 /******************************************************************************/
 
@@ -103,10 +104,10 @@ TaggerStringHash_t allURIs;
 
 HASH_VAR(s_, allFiles, TaggerFileHead_t, 101);
 
-static patricia_tree_t *allIps;
+LOCAL  patricia_tree_t *allIps;
 
 /******************************************************************************/
-void tagger_process_match(MolochSession_t *session, GPtrArray *infos)
+LOCAL void tagger_process_match(MolochSession_t *session, GPtrArray *infos)
 {
     uint32_t f, t;
     for (f = 0; f < infos->len; f++) {
@@ -122,7 +123,7 @@ void tagger_process_match(MolochSession_t *session, GPtrArray *infos)
 /*
  * Called by moloch when a session is about to be saved
  */
-void tagger_plugin_save(MolochSession_t *session, int UNUSED(final))
+LOCAL void tagger_plugin_save(MolochSession_t *session, int UNUSED(final))
 {
     TaggerString_t *tstring;
 
@@ -132,6 +133,8 @@ void tagger_plugin_save(MolochSession_t *session, int UNUSED(final))
 
     int i;
 
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wstrict-aliasing"
     if (IN6_IS_ADDR_V4MAPPED(&session->addr1)) {
         prefix.family = AF_INET;
         prefix.bitlen = 32;
@@ -162,37 +165,31 @@ void tagger_plugin_save(MolochSession_t *session, int UNUSED(final))
         tagger_process_match(session, ((TaggerIP_t *)(nodes[i]->data))->infos);
     }
 
-    // ALW - Fix when we support ipv6 for other ips
-    prefix.family = AF_INET;
-    prefix.bitlen = 32;
     if (httpXffField != -1 && session->fields[httpXffField]) {
-        if (config.fields[httpXffField]->type == MOLOCH_FIELD_TYPE_IP_HASH) {
-            MolochIntHashStd_t *ihash = session->fields[httpXffField]->ihash;
-            MolochInt_t        *xff;
+        GHashTable            *ghash;
+        GHashTableIter         iter;
+        gpointer               ikey;
 
-            HASH_FORALL(i_, *ihash, xff,
-                prefix.add.sin.s_addr = xff->i_hash;
-                cnt = patricia_search_all(allIps, &prefix, 1, nodes);
-                for (i = 0; i < cnt; i++) {
-                    tagger_process_match(session, ((TaggerIP_t *)(nodes[i]->data))->infos);
-                }
-            );
-        } else {
-            GHashTable            *ghash;
-            GHashTableIter         iter;
-            gpointer               ikey;
+        ghash = session->fields[httpXffField]->ghash;
+        g_hash_table_iter_init (&iter, ghash);
+        while (g_hash_table_iter_next (&iter, &ikey, NULL)) {
+            if (IN6_IS_ADDR_V4MAPPED((struct in6_addr*)ikey)) {
+                prefix.family = AF_INET;
+                prefix.bitlen = 32;
+                prefix.add.sin.s_addr = MOLOCH_V6_TO_V4(*(struct in6_addr*)ikey);
+            } else {
+                prefix.family = AF_INET6;
+                prefix.bitlen = 128;
+                memcpy(&prefix.add.sin6.s6_addr, ikey, 16);
+            }
 
-            ghash = session->fields[httpXffField]->ghash;
-            g_hash_table_iter_init (&iter, ghash);
-            while (g_hash_table_iter_next (&iter, &ikey, NULL)) {
-                prefix.add.sin.s_addr = (int)(long)ikey;
-                cnt = patricia_search_all(allIps, &prefix, 1, nodes);
-                for (i = 0; i < cnt; i++) {
-                    tagger_process_match(session, ((TaggerIP_t *)(nodes[i]->data))->infos);
-                }
+            cnt = patricia_search_all(allIps, &prefix, 1, nodes);
+            for (i = 0; i < cnt; i++) {
+                tagger_process_match(session, ((TaggerIP_t *)(nodes[i]->data))->infos);
             }
         }
     }
+#pragma GCC diagnostic pop
 
     MolochString_t *hstring;
     if (httpHostField != -1 && session->fields[httpHostField]) {
@@ -209,8 +206,24 @@ void tagger_plugin_save(MolochSession_t *session, int UNUSED(final))
             }
         );
     }
+
     if (dnsHostField != -1 && session->fields[dnsHostField]) {
         MolochStringHashStd_t *shash = session->fields[dnsHostField]->shash;
+        HASH_FORALL(s_, *shash, hstring,
+            HASH_FIND_HASH(s_, allDomains, hstring->s_hash, hstring->str, tstring);
+            if (tstring)
+                tagger_process_match(session, tstring->infos);
+            char *dot = strchr(hstring->str, '.');
+            if (dot && *(dot+1)) {
+                HASH_FIND(s_, allDomains, dot+1, tstring);
+                if (tstring)
+                    tagger_process_match(session, tstring->infos);
+            }
+        );
+    }
+
+    if (dnsMailServerField != -1 && session->fields[dnsMailServerField]) {
+        MolochStringHashStd_t *shash = session->fields[dnsMailServerField]->shash;
         HASH_FORALL(s_, *shash, hstring,
             HASH_FIND_HASH(s_, allDomains, hstring->s_hash, hstring->str, tstring);
             if (tstring)
@@ -272,7 +285,7 @@ void tagger_plugin_save(MolochSession_t *session, int UNUSED(final))
 }
 
 /******************************************************************************/
-void tagger_free_ip (TaggerIP_t *tip) 
+LOCAL void tagger_free_ip (TaggerIP_t *tip) 
 {
     g_ptr_array_free(tip->infos, TRUE);
     MOLOCH_TYPE_FREE(TaggerIP_t, tip);
@@ -281,7 +294,7 @@ void tagger_free_ip (TaggerIP_t *tip)
 /*
  * Called by moloch when moloch is quiting
  */
-void tagger_plugin_exit()
+LOCAL void tagger_plugin_exit()
 {
     TaggerString_t *tstring;
     HASH_FORALL_POP_HEAD(s_, allDomains, tstring,
@@ -321,7 +334,8 @@ void tagger_plugin_exit()
     Destroy_Patricia(allIps, tagger_free_ip);
 }
 
-void tagger_remove_file(GPtrArray *infos, TaggerFile_t *file)
+/******************************************************************************/
+LOCAL void tagger_remove_file(GPtrArray *infos, TaggerFile_t *file)
 {
     int f;
     for (f = 0; f < (int)infos->len; f++) {
@@ -335,7 +349,7 @@ void tagger_remove_file(GPtrArray *infos, TaggerFile_t *file)
 /*
  * Free most of the memory used by a file
  */
-void tagger_unload_file(TaggerFile_t *file) {
+LOCAL void tagger_unload_file(TaggerFile_t *file) {
     int i;
     if (file->type[0] == 'i') {
         prefix_t prefix;
@@ -394,7 +408,7 @@ void tagger_unload_file(TaggerFile_t *file) {
     file->md5 = NULL;
 }
 /******************************************************************************/
-void tagger_info_free(gpointer data)
+LOCAL void tagger_info_free(gpointer data)
 {
     TaggerInfo_t *info = data;
 
@@ -405,7 +419,7 @@ void tagger_info_free(gpointer data)
 /*
  * File data from ES
  */
-void tagger_load_file_cb(int UNUSED(code), unsigned char *data, int data_len, gpointer uw)
+LOCAL void tagger_load_file_cb(int UNUSED(code), unsigned char *data, int data_len, gpointer uw)
 {
     TaggerFile_t *file = uw;
     uint32_t out[4*100];
@@ -449,19 +463,14 @@ void tagger_load_file_cb(int UNUSED(code), unsigned char *data, int data_len, gp
             data[out[i+2] + out[i+3]] = 0;
             char **fields = g_strsplit((char*)data + out[i+2], ",", 0);
             int f;
-            for (f = 0; fields[f] && f < 100; f++) {
+            for (f = 0; f < 100 && fields[f]; f++) {
                 int shortcut = -1;
                 int pos = moloch_field_define_text(fields[f], &shortcut);
-                if (shortcut != -1 && shortcut >= 0 && shortcut < 20)
+                if (shortcut >= 0 && shortcut < 20)
                     fieldShortHand[shortcut] = pos;
             }
             g_strfreev(fields);
         }
-    }
-
-    int tag = 0;
-    for (tag = 0; file->tags[tag]; tag++) {
-        moloch_db_get_tag(NULL, tagsField, file->tags[tag], NULL);
     }
 
     patricia_node_t *node;
@@ -558,7 +567,7 @@ void tagger_load_file_cb(int UNUSED(code), unsigned char *data, int data_len, gp
 /*
  * Start loading a file from database
  */
-void tagger_load_file(TaggerFile_t *file)
+LOCAL void tagger_load_file(TaggerFile_t *file)
 {
     char                key[500];
     int                 key_len;
@@ -571,7 +580,7 @@ void tagger_load_file(TaggerFile_t *file)
 /*
  * Process the list of files from ES
  */
-void tagger_fetch_files_cb(int UNUSED(code), unsigned char *data, int data_len, gpointer UNUSED(uw))
+LOCAL void tagger_fetch_files_cb(int UNUSED(code), unsigned char *data, int data_len, gpointer UNUSED(uw))
 {
     uint32_t           hits_len;
     unsigned char     *hits = moloch_js0n_get(data, data_len, "hits", &hits_len);
@@ -628,7 +637,7 @@ void tagger_fetch_files_cb(int UNUSED(code), unsigned char *data, int data_len, 
 /*
  * Get the list of files from ES, when called at start up it will be a sync call
  */
-gboolean tagger_fetch_files (gpointer sync)
+LOCAL gboolean tagger_fetch_files (gpointer sync)
 {
     char                key[500];
     int                 key_len;
@@ -678,16 +687,19 @@ void moloch_plugin_init()
       NULL
     );
 
-    tagsField      = moloch_field_by_db("ta");
-    httpHostField  = moloch_field_by_db("ho");
-    httpXffField   = moloch_field_by_db("xff");
-    httpMd5Field   = moloch_field_by_db("hmd5");
-    httpPathField  = moloch_field_by_db("hpath");
-    emailMd5Field  = moloch_field_by_db("emd5");
-    emailSrcField  = moloch_field_by_db("esrc");
-    emailDstField  = moloch_field_by_db("edst");
-    dnsHostField   = moloch_field_by_db("dnsho");
+    tagsField      = moloch_field_by_db("tags");
+    httpHostField  = moloch_field_by_db("http.host");
+    httpXffField   = moloch_field_by_db("http.xffIp");
+    httpMd5Field   = moloch_field_by_db("http.md5");
+    httpPathField  = moloch_field_by_db("http.path");
+    emailMd5Field  = moloch_field_by_db("email.md5");
+    emailSrcField  = moloch_field_by_db("email.src");
+    emailDstField  = moloch_field_by_db("email.dst");
+    dnsHostField   = moloch_field_by_db("dns.host");
 
+    if (config.parseDNSRecordAll) {
+        dnsMailServerField = moloch_field_by_db("dns.mailserverHost");
+    }
 
     /* Call right away sync, and schedule every 60 seconds async */
     tagger_fetch_files((gpointer)1);

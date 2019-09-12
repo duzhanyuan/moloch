@@ -58,7 +58,7 @@ LOCAL int            bufCount[MOLOCH_MAX_PACKET_THREADS];
 LOCAL uint32_t       totalFlows[MOLOCH_MAX_PACKET_THREADS];
 
 /******************************************************************************/
-void netflow_send(const int thread)
+LOCAL void netflow_send(const int thread)
 {
     BSB hbsb;
 
@@ -103,7 +103,7 @@ void netflow_send(const int thread)
 /* 
  * Called by moloch when a session is about to be saved
  */
-void netflow_plugin_save(MolochSession_t *session, int UNUSED(final))
+LOCAL void netflow_plugin_save(MolochSession_t *session, int UNUSED(final))
 {
     static char zero[8] = {0, 0, 0, 0, 0, 0, 0, 0};
     const int thread = session->thread;
@@ -115,9 +115,12 @@ void netflow_plugin_save(MolochSession_t *session, int UNUSED(final))
         netflow_send(thread);
     }
 
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wstrict-aliasing"
     if (!IN6_IS_ADDR_V4MAPPED(&session->addr1)) {
         return;
     }
+#pragma GCC diagnostic pop
 
     if ((lastTime[thread].tv_sec < session->lastPacket.tv_sec) || (lastTime[thread].tv_sec == session->lastPacket.tv_sec && lastTime[thread].tv_usec < session->lastPacket.tv_usec)) {
         lastTime[thread] = session->lastPacket;
@@ -228,7 +231,7 @@ void netflow_plugin_save(MolochSession_t *session, int UNUSED(final))
 /* 
  * Called by moloch when moloch is quiting
  */
-void netflow_plugin_exit()
+LOCAL void netflow_plugin_exit()
 {
     int thread;
     for (thread = 0; thread < config.packetThreads; thread++) {
@@ -270,7 +273,7 @@ void moloch_plugin_init()
 
     char **dsts = moloch_config_str_list(NULL, "netflowDestinations", NULL);
     if (dsts == NULL || dsts[0] == NULL || dsts[0][0] == 0){
-        LOGEXIT("Unsupport netflowDestinations must be set");
+        LOGEXIT("netflowDestinations must be set");
     }
 
     int i;

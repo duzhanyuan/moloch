@@ -5,17 +5,28 @@ VIEWERDIR = @prefix@/viewer
 CP = /bin/cp
 
 
-all:
+all: molochparser.js
+
+molochparser.js: molochparser.jison
+	jison molochparser.jison
+
+check:
+	npm ci
+	npm run bundle
 
 install:
-	@mkdir -p "$(VIEWERDIR)"
+	@mkdir -p "$(VIEWERDIR)" "$(VIEWERDIR)/vueapp"
 	/bin/rm -f $(VIEWERDIR)/public/style.css
-	$(INSTALL) *.js package.json $(VIEWERDIR)
-	npm update
+	$(INSTALL) *.js package.json package-lock.json $(VIEWERDIR)
+	npm ci
 	npm run bundle:min
-	$(CP) -pr views public bundle $(VIEWERDIR)
-	(cd $(VIEWERDIR) ; npm update --production)
+	(cd public ; wget -N https://github.com/gchq/CyberChef/releases/download/v9.4.0/CyberChef_v9.4.0.zip)
+	$(CP) -pr views public $(VIEWERDIR)
+	$(CP) -pr vueapp/dist "$(VIEWERDIR)/vueapp"
+	(cd $(VIEWERDIR) ; npm ci --production)
+	rm -f $(VIEWERDIR)/package-lock.json
 
 distclean realclean clean:
 	rm -rf node_modules
 	rm -rf bundle
+	(cd vueapp ; rm -rf node_modules ; rm -rf dist)

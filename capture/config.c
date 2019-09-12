@@ -17,12 +17,83 @@
  */
 
 #include "moloch.h"
+#include <sys/types.h>
+#include <sys/stat.h>
 #include <fcntl.h>
 #include <inttypes.h>
+#include <errno.h>
 
 extern MolochConfig_t        config;
 
 LOCAL GKeyFile             *molochKeyFile;
+
+/******************************************************************************/
+gchar **moloch_config_section_raw_str_list(GKeyFile *keyfile, char *section, char *key, char *d)
+{
+    gchar **result;
+
+    if (!keyfile)
+        keyfile = molochKeyFile;
+
+    if (g_key_file_has_key(keyfile, section, key, NULL)) {
+        result = g_key_file_get_string_list(keyfile, section, key, NULL, NULL);
+    } else if (d) {
+        result = g_strsplit(d, ";", 0);
+    } else {
+        result = NULL;
+    }
+
+    return result;
+}
+
+/******************************************************************************/
+gchar **moloch_config_section_str_list(GKeyFile *keyfile, char *section, char *key, char *d)
+{
+    gchar **strs = moloch_config_section_raw_str_list(keyfile, section, key, d);
+    if (!strs) {
+        if (config.debug) {
+            LOG("%s=(null)", key);
+        }
+        return strs;
+    }
+
+    int i, j;
+    for (i = j = 0; strs[i]; i++) {
+        char *str = strs[i];
+
+        /* Remove leading and trailing spaces */
+        while (isspace(*str))
+            str++;
+        g_strchomp(str);
+
+        /* Empty string */
+        if (*str == 0) {
+            g_free(strs[i]);
+            continue;
+        }
+
+        /* Moved front of string, need to realloc so g_strfreev doesn't blow */
+        if (str != strs[i]) {
+            str = g_strdup(str);
+            g_free(strs[i]);
+        }
+
+        /* Save string back */
+        strs[j] = str;
+        j++;
+    }
+
+    /* NULL anything at the end that was moved forward */
+    for (; j < i; j++)
+        strs[j] = NULL;
+
+    if (config.debug) {
+        gchar *str = g_strjoinv(";", strs);
+        LOG("%s=%s", key, str);
+        g_free(str);
+    }
+    return strs;
+}
 
 /******************************************************************************/
 gchar *moloch_config_section_str(GKeyFile *keyfile, char *section, char *key, char *d)
@@ -73,7 +144,9 @@ gchar *moloch_config_str(GKeyFile *keyfile, char *key, char *d)
     if (!keyfile)
         keyfile = molochKeyFile;
 
-    if (g_key_file_has_key(keyfile, config.nodeName, key, NULL)) {
+    if (config.override && keyfile == molochKeyFile && (result = g_hash_table_lookup(config.override, key))) {
+        result = g_strdup(result);
+    } else if (g_key_file_has_key(keyfile, config.nodeName, key, NULL)) {
         result = g_key_file_get_string(keyfile, config.nodeName, key, NULL);
     } else if (config.nodeClass && g_key_file_has_key(keyfile, config.nodeClass, key, NULL)) {
         result = g_key_file_get_string(keyfile, config.nodeClass, key, NULL);
@@ -85,6 +158,9 @@ gchar *moloch_config_str(GKeyFile *keyfile, char *key, char *d)
         result = NULL;
     }
 
+    if (result)
+        g_strstrip(result);
+
     if (config.debug) {
         LOG("%s=%s", key, result?result:"(null)");
     }
@@ -95,12 +171,15 @@ gchar *moloch_config_str(GKeyFile *keyfile, char *key, char *d)
 /******************************************************************************/
 gchar **moloch_config_raw_str_list(GKeyFile *keyfile, char *key, char *d)
 {
+    char   *hvalue;
     gchar **result;
 
     if (!keyfile)
         keyfile = molochKeyFile;
 
-    if (g_key_file_has_key(keyfile, config.nodeName, key, NULL)) {
+    if (config.override && keyfile == molochKeyFile && (hvalue = g_hash_table_lookup(config.override, key))) {
+        result = g_strsplit(hvalue, ";", 0);
+    } else if (g_key_file_has_key(keyfile, config.nodeName, key, NULL)) {
         result = g_key_file_get_string_list(keyfile, config.nodeName, key, NULL, NULL);
     } else if (config.nodeClass && g_key_file_has_key(keyfile, config.nodeClass, key, NULL)) {
         result = g_key_file_get_string_list(keyfile, config.nodeClass, key, NULL, NULL);
@@ -167,12 +246,15 @@ gchar **moloch_config_str_list(GKeyFile *keyfile, char *key, char *d)
 /******************************************************************************/
 uint32_t moloch_config_int(GKeyFile *keyfile, char *key, uint32_t d, uint32_t min, uint32_t max)
 {
-    uint32_t value = d;
+    char     *result;
+    uint32_t  value = d;
 
     if (!keyfile)
         keyfile = molochKeyFile;
 
-    if (g_key_file_has_key(keyfile, config.nodeName, key, NULL)) {
+    if (config.override && keyfile == molochKeyFile && (result = g_hash_table_lookup(config.override, key))) {
+        value = atol(result);
+    } else if (g_key_file_has_key(keyfile, config.nodeName, key, NULL)) {
         value = g_key_file_get_integer(keyfile, config.nodeName, key, NULL);
     } else if (config.nodeClass && g_key_file_has_key(keyfile, config.nodeClass, key, NULL)) {
         value = g_key_file_get_integer(keyfile, config.nodeClass, key, NULL);
@@ -190,7 +272,7 @@ uint32_t moloch_config_int(GKeyFile *keyfile, char *key, uint32_t d, uint32_t mi
     }
 
     if (config.debug) {
-        LOG("%s=%d", key, value);
+        LOG("%s=%u", key, value);
     }
 
     return value;
@@ -199,12 +281,15 @@ uint32_t moloch_config_int(GKeyFile *keyfile, char *key, uint32_t d, uint32_t mi
 /******************************************************************************/
 double moloch_config_double(GKeyFile *keyfile, char *key, double d, double min, double max)
 {
-    double value = d;
+    char     *result;
+    double    value = d;
 
     if (!keyfile)
         keyfile = molochKeyFile;
 
-    if (g_key_file_has_key(keyfile, config.nodeName, key, NULL)) {
+    if (config.override && keyfile == molochKeyFile && (result = g_hash_table_lookup(config.override, key))) {
+        value = atof(result);
+    } else if (g_key_file_has_key(keyfile, config.nodeName, key, NULL)) {
         value = g_key_file_get_double(keyfile, config.nodeName, key, NULL);
     } else if (config.nodeClass && g_key_file_has_key(keyfile, config.nodeClass, key, NULL)) {
         value = g_key_file_get_double(keyfile, config.nodeClass, key, NULL);
@@ -227,12 +312,15 @@ double moloch_config_double(GKeyFile *keyfile, char *key, double d, double min, 
 /******************************************************************************/
 char moloch_config_boolean(GKeyFile *keyfile, char *key, char d)
 {
-    gboolean value = d;
+    char     *result;
+    gboolean  value = d;
 
     if (!keyfile)
         keyfile = molochKeyFile;
 
-    if (g_key_file_has_key(keyfile, config.nodeName, key, NULL)) {
+    if (config.override && keyfile == molochKeyFile && (result = g_hash_table_lookup(config.override, key))) {
+        value = strcmp(result, "true") == 0 || strcmp(result, "1") == 0;
+    } else if (g_key_file_has_key(keyfile, config.nodeName, key, NULL)) {
         value = g_key_file_get_boolean(keyfile, config.nodeName, key, NULL);
     } else if (config.nodeClass && g_key_file_has_key(keyfile, config.nodeClass, key, NULL)) {
         value = g_key_file_get_boolean(keyfile, config.nodeClass, key, NULL);
@@ -305,6 +393,18 @@ void moloch_config_load()
 
     if (strcmp(rotateIndex, "hourly") == 0)
         config.rotate = MOLOCH_ROTATE_HOURLY;
+    else if (strcmp(rotateIndex, "hourly2") == 0)
+        config.rotate = MOLOCH_ROTATE_HOURLY2;
+    else if (strcmp(rotateIndex, "hourly3") == 0)
+        config.rotate = MOLOCH_ROTATE_HOURLY3;
+    else if (strcmp(rotateIndex, "hourly4") == 0)
+        config.rotate = MOLOCH_ROTATE_HOURLY4;
+    else if (strcmp(rotateIndex, "hourly6") == 0)
+        config.rotate = MOLOCH_ROTATE_HOURLY6;
+    else if (strcmp(rotateIndex, "hourly8") == 0)
+        config.rotate = MOLOCH_ROTATE_HOURLY8;
+    else if (strcmp(rotateIndex, "hourly12") == 0)
+        config.rotate = MOLOCH_ROTATE_HOURLY12;
     else if (strcmp(rotateIndex, "daily") == 0)
         config.rotate = MOLOCH_ROTATE_DAILY;
     else if (strcmp(rotateIndex, "weekly") == 0)
@@ -370,15 +470,15 @@ void moloch_config_load()
     config.bpf              = moloch_config_str(keyfile, "bpf", NULL);
     config.yara             = moloch_config_str(keyfile, "yara", NULL);
     config.emailYara        = moloch_config_str(keyfile, "emailYara", NULL);
-    config.geoipFile        = moloch_config_str(keyfile, "geoipFile", NULL);
     config.rirFile          = moloch_config_str(keyfile, "rirFile", NULL);
-    config.geoipASNFile     = moloch_config_str(keyfile, "geoipASNFile", NULL);
-    config.geoip6File       = moloch_config_str(keyfile, "geoip6File", NULL);
-    config.geoipASN6File    = moloch_config_str(keyfile, "geoipASN6File", NULL);
+    config.ouiFile          = moloch_config_str(keyfile, "ouiFile", NULL);
+    config.geoLite2ASN      = moloch_config_str(keyfile, "geoLite2ASN", "/data/moloch/etc/GeoLite2-ASN.mmdb");
+    config.geoLite2Country  = moloch_config_str(keyfile, "geoLite2Country", "/data/moloch/etc/GeoLite2-Country.mmdb");
     config.dropUser         = moloch_config_str(keyfile, "dropUser", NULL);
     config.dropGroup        = moloch_config_str(keyfile, "dropGroup", NULL);
     config.pluginsDir       = moloch_config_str_list(keyfile, "pluginsDir", NULL);
     config.parsersDir       = moloch_config_str_list(keyfile, "parsersDir", " /data/moloch/parsers ; ./parsers ");
+    config.caTrustFile      = moloch_config_str(keyfile, "caTrustFile", NULL);
     char *offlineRegex      = moloch_config_str(keyfile, "offlineFilenameRegex", "(?i)\\.(pcap|cap)$");
 
     config.offlineRegex     = g_regex_new(offlineRegex, 0, 0, &error);
@@ -408,21 +508,25 @@ void moloch_config_load()
     config.timeouts[SESSION_ICMP]= moloch_config_int(keyfile, "icmpTimeout", 10, 1, 0xffff);
     config.timeouts[SESSION_UDP] = moloch_config_int(keyfile, "udpTimeout", 60, 1, 0xffff);
     config.timeouts[SESSION_TCP] = moloch_config_int(keyfile, "tcpTimeout", 60*8, 10, 0xffff);
+    config.timeouts[SESSION_SCTP]= moloch_config_int(keyfile, "sctpTimeout", 60, 10, 0xffff);
+    config.timeouts[SESSION_ESP] = moloch_config_int(keyfile, "espTimeout", 60*10, 10, 0xffff);
     config.tcpSaveTimeout        = moloch_config_int(keyfile, "tcpSaveTimeout", 60*8, 10, 60*120);
-    config.maxStreams            = moloch_config_int(keyfile, "maxStreams", 1500000, 1, 16777215);
-    config.maxPackets            = moloch_config_int(keyfile, "maxPackets", 10000, 1, 100000);
+    int maxStreams               = moloch_config_int(keyfile, "maxStreams", 1500000, 1, 16777215);
+    config.maxPackets            = moloch_config_int(keyfile, "maxPackets", 10000, 1, 0xffff);
     config.maxPacketsInQueue     = moloch_config_int(keyfile, "maxPacketsInQueue", 200000, 10000, 5000000);
-    config.dbBulkSize            = moloch_config_int(keyfile, "dbBulkSize", 200000, MOLOCH_HTTP_BUFFER_SIZE*2, 1000000);
+    config.dbBulkSize            = moloch_config_int(keyfile, "dbBulkSize", 200000, MOLOCH_HTTP_BUFFER_SIZE*2, 10000000);
     config.dbFlushTimeout        = moloch_config_int(keyfile, "dbFlushTimeout", 5, 1, 60*30);
     config.maxESConns            = moloch_config_int(keyfile, "maxESConns", 20, 5, 1000);
     config.maxESRequests         = moloch_config_int(keyfile, "maxESRequests", 500, 10, 5000);
-    config.logEveryXPackets      = moloch_config_int(keyfile, "logEveryXPackets", 50000, 1000, 1000000);
+    config.logEveryXPackets      = moloch_config_int(keyfile, "logEveryXPackets", 50000, 1000, 0xffffffff);
     config.pcapBufferSize        = moloch_config_int(keyfile, "pcapBufferSize", 300000000, 100000, 0xffffffff);
     config.pcapWriteSize         = moloch_config_int(keyfile, "pcapWriteSize", 0x40000, 0x10000, 0x800000);
     config.maxFreeOutputBuffers  = moloch_config_int(keyfile, "maxFreeOutputBuffers", 50, 0, 0xffff);
     config.fragsTimeout          = moloch_config_int(keyfile, "fragsTimeout", 60*8, 60, 0xffff);
-    config.maxFrags              = moloch_config_int(keyfile, "maxFrags", 50000, 1000, 0xffffff);
+    config.maxFrags              = moloch_config_int(keyfile, "maxFrags", 10000, 100, 0xffffff);
     config.snapLen               = moloch_config_int(keyfile, "snapLen", 16384, 1, MOLOCH_PACKET_MAX_LEN);
+    config.maxMemPercentage      = moloch_config_int(keyfile, "maxMemPercentage", 100, 5, 100);
+    config.maxReqBody            = moloch_config_int(keyfile, "maxReqBody", 256, 0, 0x7fff);
 
     config.packetThreads         = moloch_config_int(keyfile, "packetThreads", 1, 1, MOLOCH_MAX_PACKET_THREADS);
 
@@ -430,23 +534,76 @@ void moloch_config_load()
     config.logUnknownProtocols   = moloch_config_boolean(keyfile, "logUnknownProtocols", config.debug);
     config.logESRequests         = moloch_config_boolean(keyfile, "logESRequests", config.debug);
     config.logFileCreation       = moloch_config_boolean(keyfile, "logFileCreation", config.debug);
+    config.logHTTPConnections    = moloch_config_boolean(keyfile, "logHTTPConnections", config.debug || !config.pcapReadOffline);
     config.parseSMTP             = moloch_config_boolean(keyfile, "parseSMTP", TRUE);
+    config.parseSMTPHeaderAll    = moloch_config_boolean(keyfile, "parseSMTPHeaderAll", FALSE);
     config.parseSMB              = moloch_config_boolean(keyfile, "parseSMB", TRUE);
+    config.ja3Strings            = moloch_config_boolean(keyfile, "ja3Strings", FALSE);
+    config.parseDNSRecordAll     = moloch_config_boolean(keyfile, "parseDNSRecordAll", FALSE);
     config.parseQSValue          = moloch_config_boolean(keyfile, "parseQSValue", FALSE);
     config.parseCookieValue      = moloch_config_boolean(keyfile, "parseCookieValue", FALSE);
+    config.parseHTTPHeaderRequestAll      = moloch_config_boolean(keyfile, "parseHTTPHeaderRequestAll", FALSE);
+    config.parseHTTPHeaderResponseAll      = moloch_config_boolean(keyfile, "parseHTTPHeaderResponseAll", FALSE);
+    config.supportSha256         = moloch_config_boolean(keyfile, "supportSha256", FALSE);
+    config.reqBodyOnlyUtf8       = moloch_config_boolean(keyfile, "reqBodyOnlyUtf8", TRUE);
     config.compressES            = moloch_config_boolean(keyfile, "compressES", FALSE);
     config.antiSynDrop           = moloch_config_boolean(keyfile, "antiSynDrop", TRUE);
     config.readTruncatedPackets  = moloch_config_boolean(keyfile, "readTruncatedPackets", FALSE);
+    config.trackESP              = moloch_config_boolean(keyfile, "trackESP", FALSE);
+    config.yaraEveryPacket       = moloch_config_boolean(keyfile, "yaraEveryPacket", TRUE);
+    config.autoGenerateId        = moloch_config_boolean(keyfile, "autoGenerateId", FALSE);
+    config.enablePacketLen       = moloch_config_boolean(NULL, "enablePacketLen", FALSE);
 
-}
-/******************************************************************************/
-void moloch_config_get_tag_cb(MolochIpInfo_t *ii, int UNUSED(tagtype), const char *tagName, uint32_t tag)
-{
-    if (ii->numtags >= 10) return;
+    config.maxStreams[SESSION_TCP] = MAX(100, maxStreams/config.packetThreads*1.25);
+    config.maxStreams[SESSION_UDP] = MAX(100, maxStreams/config.packetThreads/20);
+    config.maxStreams[SESSION_SCTP] = MAX(100, maxStreams/config.packetThreads/20);
+    config.maxStreams[SESSION_ICMP] = MAX(100, maxStreams/config.packetThreads/200);
+    config.maxStreams[SESSION_ESP] = MAX(100, maxStreams/config.packetThreads/200);
 
-    ii->tags[ii->numtags] = tag;
-    ii->tagsStr[ii->numtags] = strdup(tagName);
-    ii->numtags++;
+
+    gchar **saveUnknownPackets     = moloch_config_str_list(keyfile, "saveUnknownPackets", NULL);
+    if (saveUnknownPackets) {
+        for (i = 0; saveUnknownPackets[i]; i++) {
+            char *s = saveUnknownPackets[i];
+
+            if (strcmp(s, "all") == 0) {
+                memset(&config.etherSavePcap, 0xff, sizeof(config.etherSavePcap));
+                memset(&config.ipSavePcap, 0xff, sizeof(config.ipSavePcap));
+            } else if (strcmp(s, "ip:all") == 0) {
+                memset(&config.ipSavePcap, 0xff, sizeof(config.ipSavePcap));
+            } else if (strcmp(s, "ether:all") == 0) {
+                memset(&config.etherSavePcap, 0xff, sizeof(config.etherSavePcap));
+            } else if (strncmp(s, "ip:", 3) == 0) {
+                int n = atoi(s+3);
+                if (n < 0 || n > 0xff)
+                    LOGEXIT("Bad value: %s", s);
+                BIT_SET(n, config.ipSavePcap);
+            } else if (strncmp(s, "-ip:", 4) == 0) {
+                int n = atoi(s+4);
+                if (n < 0 || n > 0xff)
+                    LOGEXIT("Bad value: %s", s);
+                BIT_CLR(n, config.ipSavePcap);
+            } else if (strncmp(s, "ether:", 6) == 0) {
+                int n = atoi(s+6);
+                if (n < 0 || n > 0xffff)
+                    LOGEXIT("Bad value: %s", s);
+                BIT_SET(n, config.etherSavePcap);
+            } else if (strncmp(s, "-ether:", 7) == 0) {
+                int n = atoi(s+7);
+                if (n < 0 || n > 0xffff)
+                    LOGEXIT("Bad value: %s", s);
+                BIT_CLR(n, config.etherSavePcap);
+            } else if (strcmp(s, "corrupt") == 0) {
+                config.corruptSavePcap = 1;
+            } else if (strcmp(s, "-corrupt") == 0) {
+                config.corruptSavePcap = 0;
+            } else {
+                LOGEXIT("Not sure what %s is", s);
+            }
+        }
+        g_strfreev(saveUnknownPackets);
+    }
+
 }
 /******************************************************************************/
 void moloch_config_load_local_ips()
@@ -477,7 +634,10 @@ void moloch_config_load_local_ips()
             } else if (strncmp(values[v], "rir:", 4) == 0) {
                 ii->rir = g_strdup(values[v]+4);
             } else if (strncmp(values[v], "tag:", 4) == 0) {
-                moloch_db_get_tag(ii, 0, values[v]+4, (MolochTag_cb)moloch_config_get_tag_cb);
+                if (ii->numtags < 10) {
+                    ii->tagsStr[ii->numtags] = strdup(values[v]+4);
+                    ii->numtags++;
+                }
             } else if (strncmp(values[v], "country:", 8) == 0) {
                 ii->country = g_strdup(values[v]+8);
             }
@@ -585,7 +745,7 @@ void moloch_config_load_header(char *section, char *group, char *helpBase, char 
 
         switch (type) {
         case 0:
-            kind = "textfield";
+            kind = "termfield";
             if (unique)
                 t = MOLOCH_FIELD_TYPE_STR_HASH;
             else
@@ -616,38 +776,131 @@ void moloch_config_load_header(char *section, char *group, char *helpBase, char 
 
         char expression[100];
         char field[100];
-        char rawfield[100];
         char help[100];
 
-        if (type == 0) {
-            snprintf(expression, sizeof(expression), "%s%s", expBase, name);
-            snprintf(field, sizeof(field), "%s%s.snow", dbBase, name);
-            snprintf(rawfield, sizeof(rawfield), "%s%s.raw", dbBase, name);
-            snprintf(help, sizeof(help), "%s%s", helpBase, name);
-        } else {
-            snprintf(expression, sizeof(expression), "%s%s", expBase, name);
-            snprintf(field, sizeof(field), "%s%s", dbBase, name);
-            rawfield[0] = 0;
-            snprintf(help, sizeof(help), "%s%s", helpBase, name);
-        }
+        snprintf(expression, sizeof(expression), "%s%s", expBase, name);
+        snprintf(field, sizeof(field), "%s%s", dbBase, name);
+        snprintf(help, sizeof(help), "%s%s", helpBase, name);
 
         int pos;
-        if (rawfield[0]) {
-            pos = moloch_field_define(group, kind,
-                    expression, expression, field,
-                    help,
-                    t, f,
-                    "rawField", rawfield, NULL);
-        } else {
-            pos = moloch_field_define(group, kind,
-                    expression, expression, field,
-                    help,
-                    t, f, NULL);
-        }
+        pos = moloch_field_define(group, kind,
+                expression, expression, field,
+                help,
+                t, f, (char *)NULL);
         moloch_config_add_header(hash, g_strdup(keys[k]), pos);
         g_strfreev(values);
     }
     g_strfreev(keys);
+}
+
+/******************************************************************************/
+#define MOLOCH_CONFIG_FILES 100
+typedef struct {
+    char                 *desc;
+    int                   num;
+    char                 *name[MOLOCH_CONFIG_FILES];
+    MolochFileChange_cb   cb;
+    MolochFilesChange_cb  cbs;
+    off_t                 size[MOLOCH_CONFIG_FILES];
+    int64_t               modify[MOLOCH_CONFIG_FILES];
+} MolochFileChange_t;
+
+LOCAL int                numFiles;
+LOCAL MolochFileChange_t files[MOLOCH_CONFIG_FILES];
+/******************************************************************************/
+void moloch_config_monitor_file(char *desc, char *name, MolochFileChange_cb cb)
+{
+    struct stat     sb;
+
+    if (numFiles >= MOLOCH_CONFIG_FILES)
+        LOGEXIT("Couldn't monitor anymore files %s %s", desc, name);
+
+    if (stat(name, &sb) != 0) {
+        LOGEXIT("Couldn't stat %s file %s error %s", desc, name, strerror(errno));
+    }
+
+    files[numFiles].name[0] = g_strdup(name);
+    files[numFiles].modify[0] = sb.st_mtime;
+
+    files[numFiles].desc = g_strdup(desc);
+    files[numFiles].cb = cb;
+    files[numFiles].num = 1;
+
+    numFiles++;
+    cb(name);
+}
+/******************************************************************************/
+void moloch_config_monitor_files(char *desc, char **names, MolochFilesChange_cb cb)
+{
+    struct stat     sb;
+    int             i;
+
+    if (numFiles >= MOLOCH_CONFIG_FILES)
+        LOGEXIT("Couldn't monitor anymore files %s %s", desc, names[0]);
+
+    for (i = 0; i < MOLOCH_CONFIG_FILES && names[i]; i++) {
+        if (stat(names[i], &sb) != 0) {
+            LOGEXIT("Couldn't stat %s file %s error %s", desc, names[i], strerror(errno));
+        }
+
+        files[numFiles].name[i] = g_strdup(names[i]);
+        files[numFiles].modify[i] = sb.st_mtime;
+    }
+
+    files[numFiles].desc = g_strdup(desc);
+    files[numFiles].cbs = cb;
+    files[numFiles].num = i;
+
+    numFiles++;
+    cb(names);
+}
+/******************************************************************************/
+gboolean moloch_config_reload_files (gpointer UNUSED(user_data))
+{
+    int             i, f;
+    struct stat     sb[MOLOCH_CONFIG_FILES];
+
+    for (i = 0; i < numFiles; i++) {
+        int changed = 0;
+        for (f = 0; f < files[i].num; f++) {
+            if (stat(files[i].name[f], &sb[f]) != 0) {
+                LOG("Couldn't stat %s file %s error %s", files[i].desc, files[i].name[f], strerror(errno));
+                changed = 0;
+                break;
+            }
+
+            if (sb[f].st_size <= 1) { // Ignore tiny files for reloads
+                changed = 0;
+                break;
+            }
+
+            if (sb[f].st_mtime > files[i].modify[f]) {
+                if (files[i].size[f] != sb[f].st_size) {
+                    files[i].size[f] = sb[f].st_size;
+                    changed = 0;
+                    break;
+                }
+                if (config.debug)
+                    LOG("Changed %s %s", files[i].desc, files[i].name[f]);
+                changed = 1;
+            }
+        }
+
+        // Something was changed
+        if (changed) {
+            if (files[i].cbs)
+                files[i].cbs(files[i].name);
+            else
+                files[i].cb(files[i].name[0]);
+
+            for (f = 0; f < files[i].num; f++) {
+                files[i].size[f] = 0;
+                files[i].modify[f] = sb[f].st_mtime;
+            }
+        }
+    }
+
+    return TRUE;
 }
 /******************************************************************************/
 void moloch_config_init()
@@ -660,6 +913,11 @@ void moloch_config_init()
         LOG("maxFileSizeB: %" PRIu64, config.maxFileSizeB);
     }
 
+    if (config.interface && !config.interface[0]) {
+        printf("interface set in config file, but it is empty\n");
+        exit (1);
+    }
+
     if (!config.interface && !config.pcapReadOffline) {
         printf("Need to set interface, pcap file (-r) or pcap directory (-R) \n");
         exit (1);
@@ -668,6 +926,10 @@ void moloch_config_init()
     if (!config.pcapDir) {
         printf("Must set a pcapDir to save files to\n");
         exit(1);
+    }
+
+    if (!config.dryRun) {
+        g_timeout_add_seconds( 10, moloch_config_reload_files, 0);
     }
 }
 /******************************************************************************/

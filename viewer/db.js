@@ -21,25 +21,29 @@
 'use strict';
 
 var ESC            = require('elasticsearch'),
-    async          = require('async'),
     os             = require('os'),
-    fs             = require('fs'),
-    util           = require('util');
+    fs             = require('fs');
 
-var internals = {tagId2Name: {},
-                 tagName2Id: {},
-                 fileId2File: {},
+var internals = {fileId2File: {},
                  fileName2File: {},
                  molochNodeStatsCache: {},
                  healthCache: {},
+                 indicesCache: {},
+                 indicesSettingsCache: {},
                  usersCache: {},
+                 lookupsCache: {},
+                 nodesStatsCache: {},
+                 nodesInfoCache: {},
                  qInProgress: 0,
-                 apiVersion: "2.x",
+                 apiVersion: "6.7",
                  q: []};
 
 exports.initialize = function (info, cb) {
   internals.dontMapTags = info.dontMapTags === 'true' || info.dontMapTags === true || false;
+  internals.debug = info.debug || 0;
   delete info.dontMapTags;
+  delete info.debug;
+
   internals.info = info;
 
   if (info.prefix && info.prefix.charAt(info.prefix.length-1) !== "_") {
@@ -57,34 +61,44 @@ exports.initialize = function (info, cb) {
   internals.nodeName = info.nodeName;
   delete info.nodeName;
 
+  var esSSLOptions =  {rejectUnauthorized: !internals.info.insecure, ca: internals.info.ca};
+  if(info.esClientKey) {
+    esSSLOptions.key = fs.readFileSync(info.esClientKey);
+    esSSLOptions.cert = fs.readFileSync(info.esClientCert);
+    if(info.esClientKeyPass) {
+       esSSLOptions.passphrase = info.esClientKeyPass;
+    }
+  }
+
   internals.elasticSearchClient = new ESC.Client({
     host: internals.info.host,
     apiVersion: internals.apiVersion,
-    requestTimeout: 300000,
+    requestTimeout: (parseInt(info.requestTimeout, 10) + 30) * 1000 || 330000,
     keepAlive: true,
     minSockets: 20,
-    maxSockets: 51
+    maxSockets: 51,
+    ssl: esSSLOptions
   });
 
-  internals.elasticSearchClient.info(function(err,data) {
+  internals.elasticSearchClient.info((err,data) => {
     if (err) {
       console.log(err, data);
     }
-    if (data.version.number.match(/^(2.[0-3]|1|0)/)) {
-      console.log("ERROR - ES", data.version.number, "not supported, ES 2.4.x or later required.");
+    if (data.version.number.match(/^(6.[0-6]|[0-5]|8)/)) {
+      console.log("ERROR - ES", data.version.number, "not supported, ES 6.7.x or later required.");
       process.exit();
       throw new Error("Exiting");
     }
-    exports.isES5 = data.version.number.match(/^5/);
 
     if (info.usersHost) {
       internals.usersElasticSearchClient = new ESC.Client({
         host: internals.info.usersHost,
         apiVersion: internals.apiVersion,
-        requestTimeout: 300000,
+        requestTimeout: info.requestTimeout*1000 || 300000,
         keepAlive: true,
         minSockets: 5,
-        maxSockets: 6
+        maxSockets: 6,
+        ssl: esSSLOptions
       });
     } else {
       internals.usersElasticSearchClient = internals.elasticSearchClient;
@@ -94,8 +108,6 @@ exports.initialize = function (info, cb) {
 
   // Replace tag implementation
   if (internals.dontMapTags) {
-    exports.tagIdToName = function (id, cb) { return cb(id); };
-    exports.tagNameToId = function (name, cb) { return cb(name); };
     exports.isLocalView = function(node, yesCB, noCB) {return noCB(); };
     internals.prefix = "MULTIPREFIX_";
   }
@@ -107,8 +119,10 @@ exports.initialize = function (info, cb) {
 //
 //
 function fixIndex(index) {
+  if (index === undefined) {return undefined;}
+
   if (Array.isArray(index)) {
-    return index.map(function(val) {
+    return index.map((val) => {
       if (val.lastIndexOf(internals.prefix, 0) === 0) {
         return val;
       } else {
@@ -131,82 +145,146 @@ exports.merge = function(to, from) {
 };
 
 exports.get = function (index, type, id, cb) {
-  internals.elasticSearchClient.get({index: fixIndex(index), type: type, id: id}, cb);
+  return internals.elasticSearchClient.get({index: fixIndex(index), type: type, id: id}, cb);
 };
 
 exports.getWithOptions = function (index, type, id, options, cb) {
   var params = {index: fixIndex(index), type:type, id: id};
   exports.merge(params, options);
-  internals.elasticSearchClient.get(params, cb);
+  return internals.elasticSearchClient.get(params, cb);
 };
 
 exports.index = function (index, type, id, document, cb) {
-  internals.elasticSearchClient.index({index: fixIndex(index), type: type, body: document, id: id}, cb);
+  return internals.elasticSearchClient.index({index: fixIndex(index), type: type, body: document, id: id}, cb);
 };
 
 exports.indexNow = function (index, type, id, document, cb) {
-  internals.elasticSearchClient.index({index: fixIndex(index), type: type, body: document, id: id, refresh: 1}, cb);
+  return internals.elasticSearchClient.index({index: fixIndex(index), type: type, body: document, id: id, refresh: true}, cb);
 };
 
 exports.search = function (index, type, query, options, cb) {
-  if (!cb) {
+  if (!cb && typeof options === 'function') {
     cb = options;
     options = undefined;
   }
-  var params = {index: fixIndex(index), type: type, body: query};
+
+  let params = {
+    index: fixIndex(index),
+    type: type,
+    body: query, rest_total_hits_as_int: true
+  };
+
   exports.merge(params, options);
-  internals.elasticSearchClient.search(params, cb);
+
+  return internals.elasticSearchClient.search(params, cb);
 };
 
+exports.cancelByOpaqueId = function(cancelId, cb) {
+  internals.elasticSearchClient.tasks.list({detailed: "false", group_by: "parents"})
+    .then((results) => {
+      let found = false;
+
+      for (let resultKey in results.tasks) {
+        let result = results.tasks[resultKey];
+        if (result.headers &&
+          result.headers['X-Opaque-Id'] &&
+          result.headers['X-Opaque-Id'] === cancelId) {
+          found = true;
+          internals.elasticSearchClient.tasks.cancel({ taskId: resultKey }, () => {});
+        }
+      }
+
+      // not found, return error
+      if (!found) { return cb('cancel id not found, cannot cancel es task(s)'); }
+
+      return cb();
+    })
+    .catch((error) => {
+      return cb(error);
+    });
+};
+
+function searchScrollInternal(index, type, query, options, cb) {
+  let from = +query.from || 0;
+  let size = +query.size || 0;
+
+  let querySize = from + size;
+  delete query.from;
+
+  var totalResults;
+  var params = {scroll: '5m'};
+  exports.merge(params, options);
+  query.size = 1000; // Get 1000 items per scroll call
+  exports.search(index, type, query, params,
+    function getMoreUntilDone(error, response) {
+      if (error) {
+        if (totalResults && from > 0) {
+          totalResults.hits.hits = totalResults.hits.hits.slice(from);
+        }
+        if (response && response._scroll_id) {
+          exports.clearScroll({body:{scroll_id: response._scroll_id}});
+        }
+        return cb(error, totalResults);
+      }
+
+      if (totalResults === undefined) {
+        totalResults = response;
+      } else {
+        Array.prototype.push.apply(totalResults.hits.hits, response.hits.hits);
+      }
+
+      if (totalResults.hits.total > 0 && totalResults.hits.hits.length < Math.min(response.hits.total, querySize)) {
+        exports.scroll({
+          scroll: '5m',
+          body: {
+            scroll_id: response._scroll_id,
+          }
+        }, getMoreUntilDone);
+      } else {
+        if (totalResults && from > 0) {
+          totalResults.hits.hits = totalResults.hits.hits.slice(from);
+        }
+        exports.clearScroll({body:{scroll_id: response._scroll_id}});
+        return cb(null, totalResults);
+      }
+    });
+}
+
 exports.searchScroll = function (index, type, query, options, cb) {
-  if (!cb) {
-    cb = options;
-    options = {};
-  }
-
-  if ((query.size || 0) + (parseInt(query.from,10) || 0) >= 10000) {
-    var totalResults;
-    var params = {scroll: '1m'};
-    exports.merge(params, options);
-    var querySize = query.size;
-    delete query.size
-    exports.search(index, type, query, params,
-      function getMoreUntilDone(error, response) {
-        if (totalResults === undefined) {
-          totalResults = response;
-        } else {
-          Array.prototype.push.apply(totalResults.hits.hits, response.hits.hits);
-        }
-
-        if (!error && totalResults.hits.total > 0 && totalResults.hits.hits.length < Math.min(response.hits.total, querySize)) {
-          exports.scroll({
-            scrollId: response._scroll_id,
-            scroll: '1m',
-            body: { // ALW - Remove someday - https://github.com/elastic/elasticsearch-php/issues/564
-              scroll_id: response._scroll_id,
-            }
-          }, getMoreUntilDone);
-        } else {
-            cb(error, totalResults);
-        }
+  if ((query.size || 0) + (parseInt(query.from, 10) || 0) >= 10000) {
+    if (cb) {
+      return searchScrollInternal(index, type, query, options, cb);
+    } else {
+      return new Promise((resolve, reject) => {
+        searchScrollInternal(index, type, query, options, (err, data) => {
+          if (err) {
+            reject(err);
+          } else {
+            resolve(data);
+          }
+        });
       });
+    }
   } else {
     return exports.search(index, type, query, options, cb);
   }
 };
 
 exports.searchPrimary = function (index, type, query, options, cb) {
-  if (!cb) {
-    cb = options;
-    options = undefined;
+  // ALW - FIXME - 6.1+ has removed primary_first :(
+  let params = { preference: 'primaries', ignore_unavailable: 'true' };
+
+  if (options && options.cancelId) {
+    // set X-Opaque-Id header on the params so the task can be canceled
+    params.headers = { 'X-Opaque-Id': options.cancelId };
   }
 
-  var params = {preference: "_primary_first", ignore_unavailable: "true"};
   exports.merge(params, options);
+  delete params.cancelId;
   return exports.searchScroll(index, type, query, params, cb);
 };
 
-exports.msearch = function (index, type, queries, cb) {
+exports.msearch = function (index, type, queries, options, cb) {
   var body = [];
 
   for(var i = 0, ilen = queries.length; i < ilen; i++){
@@ -214,33 +292,92 @@ exports.msearch = function (index, type, queries, cb) {
     body.push(queries[i]);
   }
 
-  internals.elasticSearchClient.msearch({body: body}, cb);
+  let params = {body: body, rest_total_hits_as_int: true};
+
+  if (options && options.cancelId) {
+    // set X-Opaque-Id header on the params so the task can be canceled
+    params.headers = { 'X-Opaque-Id': options.cancelId };
+  }
+
+  return internals.elasticSearchClient.msearch(params, cb);
 };
 
 exports.scroll = function (params, callback) {
-  internals.elasticSearchClient.scroll(params, callback);
+  return internals.elasticSearchClient.scroll(params, callback);
+};
+
+exports.clearScroll = function (params, callback) {
+  return internals.elasticSearchClient.clearScroll(params, callback);
+};
+
+exports.bulk = function (params, callback) {
+  return internals.elasticSearchClient.bulk(params, callback);
 };
 
 exports.deleteByQuery = function (index, type, query, cb) {
-  internals.elasticSearchClient.deleteByQuery({index: fixIndex(index), type: type, body: query}, cb);
+  return internals.elasticSearchClient.deleteByQuery({index: fixIndex(index), type: type, body: query}, cb);
 };
 
 exports.deleteDocument = function (index, type, id, options, cb) {
-  if (!cb) {
+  if (!cb && typeof options === 'function') {
     cb = options;
     options = undefined;
   }
   var params = {index: fixIndex(index), type: type, id: id};
   exports.merge(params, options);
-  internals.elasticSearchClient.delete(params, cb);
+  return internals.elasticSearchClient.delete(params, cb);
+};
+
+// This API does not call fixIndex
+exports.deleteIndex = function (index, options, cb) {
+  if (!cb && typeof options === 'function') {
+    cb = options;
+    options = undefined;
+  }
+  var params = {index: index};
+  exports.merge(params, options);
+  return internals.elasticSearchClient.indices.delete(params, cb);
+};
+
+// This API does not call fixIndex
+exports.optimizeIndex = function (index, options, cb) {
+  if (!cb && typeof options === 'function') {
+    cb = options;
+    options = undefined;
+  }
+  var params = {index: index, maxNumSegments: 1};
+  exports.merge(params, options);
+  return internals.elasticSearchClient.indices.forcemerge(params, cb);
+};
+
+// This API does not call fixIndex
+exports.closeIndex = function (index, options, cb) {
+  if (!cb && typeof options === 'function') {
+    cb = options;
+    options = undefined;
+  }
+  var params = {index: index};
+  exports.merge(params, options);
+  return internals.elasticSearchClient.indices.close(params, cb);
+};
+
+// This API does not call fixIndex
+exports.openIndex = function (index, options, cb) {
+  if (!cb && typeof options === 'function') {
+    cb = options;
+    options = undefined;
+  }
+  var params = {index: index};
+  exports.merge(params, options);
+  return internals.elasticSearchClient.indices.open(params, cb);
 };
 
 exports.indexStats = function(index, cb) {
-  internals.elasticSearchClient.indices.stats({index: fixIndex(index)}, cb);
+  return internals.elasticSearchClient.indices.stats({index: fixIndex(index)}, cb);
 };
 
 exports.getAliases = function(index, cb) {
-  internals.elasticSearchClient.indices.getAliases({index: fixIndex(index)}, cb);
+  return internals.elasticSearchClient.indices.getAlias({index: fixIndex(index)}, cb);
 };
 
 exports.getAliasesCache = function (index, cb) {
@@ -248,7 +385,7 @@ exports.getAliasesCache = function (index, cb) {
     return cb(null, internals.aliasesCache);
   }
 
-  exports.getAliases(index, function(err, aliases) {
+  exports.getAliases(index, (err, aliases) => {
     if (err) {
       return cb(err, aliases);
     }
@@ -261,8 +398,8 @@ exports.getAliasesCache = function (index, cb) {
 };
 
 exports.health = function(cb) {
-  internals.elasticSearchClient.info(function(err,data) {
-    internals.elasticSearchClient.cluster.health({}, function(err, result) {
+  return internals.elasticSearchClient.info((err,data) => {
+    internals.elasticSearchClient.cluster.health({}, (err, result) => {
       if (data && result) {
         result.version = data.version.number;
       }
@@ -271,45 +408,196 @@ exports.health = function(cb) {
   });
 };
 
+exports.indices = function(cb, index) {
+  return internals.elasticSearchClient.cat.indices({format: "json", index: fixIndex(index), bytes: "b", h: "health,status,index,uuid,pri,rep,docs.count,store.size,cd,segmentsCount,pri.search.query_current,memoryTotal"}, cb);
+};
+
+exports.indicesSettings = function(cb, index) {
+  return internals.elasticSearchClient.indices.getSettings({flatSettings: true, index: fixIndex(index)}, cb);
+};
+
+exports.shards = function(cb) {
+  return internals.elasticSearchClient.cat.shards({format: "json", bytes: "b", h: "index,shard,prirep,state,docs,store,ip,node,ur,uf,fm,sm"}, cb);
+};
+
+exports.recovery = function(sortField, cb) {
+  return internals.elasticSearchClient.cat.recovery({format: "json", bytes: "b", s: sortField}, cb);
+};
+
+exports.getClusterSettings = function(options, cb) {
+  return internals.elasticSearchClient.cluster.getSettings(options, cb);
+};
+
+exports.putClusterSettings = function(options, cb) {
+  return internals.elasticSearchClient.cluster.putSettings(options, cb);
+};
+
+exports.tasks = function(cb) {
+  return internals.elasticSearchClient.tasks.list({detailed: "false", group_by: "parents"}, cb);
+};
+
+exports.taskCancel = function(taskId, cb) {
+  return internals.elasticSearchClient.tasks.cancel({taskId: taskId}, cb);
+};
+
 exports.nodesStats = function (options, cb) {
-  return internals.elasticSearchClient.nodes.stats(options, function (err, data, status) {cb(err,data);});
+  return internals.elasticSearchClient.nodes.stats(options, cb);
+};
+
+exports.nodesInfo = function (options, cb) {
+  return internals.elasticSearchClient.nodes.info(options, cb);
 };
 
 exports.update = function (index, type, id, document, options, cb) {
-  if (!cb) {
+  if (!cb && typeof options === 'function') {
     cb = options;
     options = undefined;
   }
 
   var params = {index: fixIndex(index), type: type, body: document, id: id};
   exports.merge(params, options);
-  internals.elasticSearchClient.update(params, cb);
+  return internals.elasticSearchClient.update(params, cb);
 };
 
 exports.close = function () {
-  internals.elasticSearchClient.close();
+  return internals.elasticSearchClient.close();
+};
+
+exports.flush = function (index, cb) {
+  return internals.usersElasticSearchClient.indices.flush({index: fixIndex(index)}, cb);
+};
+
+exports.refresh = function (index, cb) {
+  return internals.usersElasticSearchClient.indices.refresh({index: fixIndex(index)}, cb);
+};
+
+exports.addTagsToSession = function (index, id, tags, node, cb) {
+  let params = {
+    retry_on_conflict: 3,
+    index: fixIndex(index),
+    type: 'session',
+    id: id
+  };
+
+  let script = `
+    if (ctx._source.tags != null) {
+      for (int i = 0; i < params.tags.length; i++) {
+        if (ctx._source.tags.indexOf(params.tags[i]) == -1) {
+          ctx._source.tags.add(params.tags[i]);
+        }
+      }
+      ctx._source.tagsCnt = ctx._source.tags.length;
+    } else {
+      ctx._source.tags = params.tags;
+      ctx._source.tagsCnt = params.tags.length;
+    }
+  `;
+
+  params.body = {
+    script: {
+      inline: script,
+      lang: 'painless',
+      params: {
+        tags: tags
+      }
+    }
+  };
+
+  if (node) { params.body._node = node; }
+
+  return internals.elasticSearchClient.update(params, cb);
+};
+
+exports.removeTagsFromSession = function (index, id, tags, node, cb) {
+  let params = {
+    retry_on_conflict: 3,
+    index: fixIndex(index),
+    type: 'session',
+    id: id
+  };
+
+  let script = `
+    if (ctx._source.tags != null) {
+      for (int i = 0; i < params.tags.length; i++) {
+        int index = ctx._source.tags.indexOf(params.tags[i]);
+        if (index > -1) { ctx._source.tags.remove(index); }
+      }
+      ctx._source.tagsCnt = ctx._source.tags.length;
+      if (ctx._source.tagsCnt == 0) {
+        ctx._source.remove("tags");
+        ctx._source.remove("tagsCnt");
+      }
+    }
+  `;
+
+  params.body = {
+    script: {
+      inline: script,
+      lang: 'painless',
+      params: {
+        tags: tags
+      }
+    }
+  };
+
+  if (node) { params.body._node = node; }
+
+  return internals.elasticSearchClient.update(params, cb);
+};
+
+exports.addHuntToSession = function (index, id, huntId, huntName, cb) {
+  let params = {
+    retry_on_conflict: 3,
+    index: fixIndex(index),
+    type: 'session',
+    id: id
+  };
+
+  let script = `
+    if (ctx._source.huntId != null) {
+      ctx._source.huntId.add(params.huntId);
+    } else {
+      ctx._source.huntId = [ params.huntId ];
+    }
+    if (ctx._source.huntName != null) {
+      ctx._source.huntName.add(params.huntName);
+    } else {
+      ctx._source.huntName = [ params.huntName ];
+    }
+  `;
+
+  params.body = {
+    script: {
+      inline: script,
+      lang: 'painless',
+      params: {
+        huntId: huntId,
+        huntName: huntName
+      }
+    }
+  };
+
+  return internals.elasticSearchClient.update(params, cb);
 };
 
 //////////////////////////////////////////////////////////////////////////////////
 //// High level functions
 //////////////////////////////////////////////////////////////////////////////////
 exports.flushCache = function () {
-  internals.tagId2Name = {};
-  internals.tagName2Id = {};
   internals.fileId2File = {};
   internals.fileName2File = {};
   internals.molochNodeStatsCache = {};
   internals.healthCache = {};
   internals.usersCache = {};
+  internals.lookupsCache = {};
   delete internals.aliasesCache;
 };
-
 exports.searchUsers = function(query, cb) {
-  return internals.usersElasticSearchClient.search({index: internals.usersPrefix + 'users', type: 'user', body: query}, cb);
+  return internals.usersElasticSearchClient.search({index: internals.usersPrefix + 'users', type: 'user', body: query, rest_total_hits_as_int: true}, cb);
 };
 
 exports.getUser = function (name, cb) {
-  internals.usersElasticSearchClient.get({index: internals.usersPrefix + 'users', type: 'user', id: name}, cb);
+  return internals.usersElasticSearchClient.get({index: internals.usersPrefix + 'users', type: 'user', id: name}, cb);
 };
 
 exports.getUserCache = function (name, cb) {
@@ -317,7 +605,7 @@ exports.getUserCache = function (name, cb) {
     return cb(null, internals.usersCache[name]);
   }
 
-  exports.getUser(name, function(err, suser) {
+  exports.getUser(name, (err, suser) => {
     if (err) {
       return cb(err, suser);
     }
@@ -330,27 +618,117 @@ exports.getUserCache = function (name, cb) {
 };
 
 exports.numberOfUsers = function(cb) {
-  internals.usersElasticSearchClient.count({index: internals.usersPrefix + 'users', ignoreUnavailable:true}, function(err, result) {
-    if (err || result.error) {
-      return cb(null, 0);
-    }
-
-    return cb(null, result.count);
-  });
+  return internals.usersElasticSearchClient.count({index: internals.usersPrefix + 'users', ignoreUnavailable:true}, cb);
 };
 
 exports.deleteUser = function (name, cb) {
   delete internals.usersCache[name];
-  return internals.usersElasticSearchClient.delete({index: internals.usersPrefix + 'users', type: 'user', id: name, refresh: 1}, cb);
+  return internals.usersElasticSearchClient.delete({index: internals.usersPrefix + 'users', type: 'user', id: name, refresh: true}, (err) => {
+    delete internals.usersCache[name]; // Delete again after db says its done refreshing
+    cb(err);
+  });
 };
 
 exports.setUser = function(name, doc, cb) {
   delete internals.usersCache[name];
-  return internals.usersElasticSearchClient.index({index: internals.usersPrefix + 'users', type: 'user', body: doc, id: name, refresh: 1}, cb);
+  return internals.usersElasticSearchClient.index({index: internals.usersPrefix + 'users', type: 'user', body: doc, id: name, refresh: true}, (err) => {
+    delete internals.usersCache[name]; // Delete again after db says its done refreshing
+    cb(err);
+  });
+};
+
+function twoDigitString(value) {
+  return (value < 10) ? ("0" + value) : value.toString();
+}
+
+exports.historyIt = function(doc, cb) {
+  var d     = new Date(Date.now());
+  var jan   = new Date(d.getUTCFullYear(), 0, 0);
+  var iname = internals.prefix + 'history_v1-' +
+    twoDigitString(d.getUTCFullYear()%100) + 'w' +
+    twoDigitString(Math.floor((d - jan) / 604800000));
+
+  return internals.elasticSearchClient.index({index:iname, type:'history', body:doc, refresh: true}, cb);
+};
+exports.searchHistory = function(query, cb) {
+  return internals.elasticSearchClient.search({index:fixIndex('history_v1-*'), type:"history", body:query, rest_total_hits_as_int: true}, cb);
+};
+exports.numberOfLogs = function(cb) {
+  return internals.elasticSearchClient.count({index:fixIndex('history_v1-*'), type:"history", ignoreUnavailable:true}, cb);
+};
+exports.deleteHistoryItem = function (id, index, cb) {
+  return internals.elasticSearchClient.delete({index:index, type: 'history', id: id, refresh: true}, cb);
+};
+
+exports.createHunt = function (doc, cb) {
+  return internals.elasticSearchClient.index({index:fixIndex('hunts'), type:'hunt', body:doc, refresh: "wait_for"}, cb);
+};
+exports.searchHunt = function (query, cb) {
+  return internals.elasticSearchClient.search({index:fixIndex('hunts'), type:'hunt', body:query, rest_total_hits_as_int: true}, cb);
+};
+exports.numberOfHunts = function(cb) {
+  return internals.elasticSearchClient.count({index:fixIndex('hunts'), type:'hunt'}, cb);
+};
+exports.deleteHuntItem = function (id, cb) {
+  return internals.elasticSearchClient.delete({index:fixIndex('hunts'), type:'hunt', id:id, refresh:true}, cb);
+};
+exports.setHunt = function (id, doc, cb) {
+  return internals.elasticSearchClient.index({index:fixIndex('hunts'), type: 'hunt', body:doc, id: id, refresh:true}, cb);
+};
+
+exports.searchLookups = function (query, cb) {
+  return internals.elasticSearchClient.search({index:fixIndex('lookups'), type:'lookup', body:query, rest_total_hits_as_int: true}, cb);
+};
+exports.createLookup = function (doc, username, cb) {
+  internals.lookupsCache = {};
+  return internals.elasticSearchClient.index({index:fixIndex('lookups'), type:'lookup', body:doc, refresh: "wait_for"}, cb);
+};
+exports.deleteLookup = function (id, username, cb) {
+  internals.lookupsCache = {};
+  return internals.elasticSearchClient.delete({index:fixIndex('lookups'), type:'lookup', id:id, refresh:true}, cb);
+};
+exports.setLookup = function (id, username, doc, cb) {
+  internals.lookupsCache = {};
+  return internals.elasticSearchClient.index({index:fixIndex('lookups'), type: 'lookup', body:doc, id: id, refresh:true}, cb);
+};
+exports.getLookup = function (id, cb) {
+  return internals.elasticSearchClient.get({index:fixIndex('lookups'), type:'lookup', id:id}, cb);
+};
+exports.getLookupsCache = function (name, cb) {
+  if (internals.lookupsCache[name] && internals.lookupsCache._timeStamp > Date.now() - 30000) {
+    return cb(null, internals.lookupsCache[name]);
+  }
+
+  // only get lookups for this user or shared
+  const query = {
+    query: {
+      bool: {
+        should: [
+          { term: { shared: true } },
+          { term: { userId: name } }
+        ]
+      }
+    }
+  };
+
+  exports.searchLookups(query, (err, lookups) => {
+    if (err) { return cb(err, lookups); }
+
+    let lookupsMap = {};
+    for (let lookup of lookups.hits.hits) {
+      // need the whole object to test for type mismatch
+      lookupsMap[lookup._source.name] = lookup;
+    }
+
+    internals.lookupsCache[name] = lookupsMap;
+    internals.lookupsCache._timeStamp = Date.now();
+
+    cb(null, lookupsMap);
+  });
 };
 
 exports.molochNodeStats = function (name, cb) {
-  exports.get('stats', 'stat', name, function(err, stat) {
+  exports.get('stats', 'stat', name, (err, stat) => {
     if (err || !stat.found) {
 
       // Even if an error, if we have a cached value use it
@@ -386,29 +764,126 @@ exports.healthCache = function (cb) {
     return cb(null, internals.healthCache);
   }
 
-  return exports.health(function(err, health) {
-      if (err) {
-        // Even if an error, if we have a cache use it
-        if (internals.healthCache._timeStamp !== undefined) {
-          return cb(null, internals.healthCache);
-        }
-        return cb(err, null);
+  return exports.health((err, health) => {
+    if (err) {
+      // Even if an error, if we have a cache use it
+      if (internals.healthCache._timeStamp !== undefined) {
+        return cb(null, internals.healthCache);
       }
+      return cb(err, null);
+    }
 
-      exports.get("dstats", "version", "version", function(err, doc) {
-        if (doc !== undefined && doc._source !== undefined) {
-          health.molochDbVersion = doc._source.version;
-        }
-        internals.healthCache = health;
-        internals.healthCache._timeStamp = Date.now();
-        cb(null, health);
-      });
+    internals.elasticSearchClient.indices.getTemplate({name: fixIndex("sessions2_template"), filter_path: "**._meta", include_type_name: true}, (err, doc) => {
+      if (err) {
+        return cb(null, health);
+      }
+      health.molochDbVersion = doc[fixIndex("sessions2_template")].mappings.session._meta.molochDbVersion;
+      internals.healthCache = health;
+      internals.healthCache._timeStamp = Date.now();
+      cb(null, health);
+    });
+  });
+};
+
+exports.healthCachePromise = function () {
+  return new Promise(function(resolve, reject) {
+    exports.healthCache((err, data) => {
+      if (err) {
+        reject(err);
+      } else {
+        resolve(data);
+      }
+    });
+  });
+};
+
+exports.nodesInfoCache = function () {
+  if (internals.nodesInfoCache._timeStamp !== undefined && internals.nodesInfoCache._timeStamp > Date.now() - 30000) {
+    return new Promise((resolve, reject) => {resolve(internals.nodesInfoCache);});
+  }
+
+  return new Promise((resolve, reject) => {
+    exports.nodesInfo((err, data) => {
+      if (err) {
+        reject(err);
+      } else {
+        internals.nodesInfoCache = data;
+        internals.nodesInfoCache._timeStamp = Date.now();
+        resolve(data);
+      }
+    });
+  });
+};
+
+exports.nodesStatsCache = function () {
+  if (internals.nodesStatsCache._timeStamp !== undefined && internals.nodesStatsCache._timeStamp > Date.now() - 2500) {
+    return new Promise((resolve, reject) => {resolve(internals.nodesStatsCache);});
+  }
+
+  return new Promise((resolve, reject) => {
+    exports.nodesStats({metric: 'jvm,process,fs,os,indices,thread_pool'}, (err, data) => {
+      if (err) {
+        reject(err);
+      } else {
+        internals.nodesStatsCache = data;
+        internals.nodesStatsCache._timeStamp = Date.now();
+        resolve(data);
+      }
+    });
+  });
+};
+
+exports.indicesCache = function (cb) {
+  if (!cb) {
+    return internals.indicesCache;
+  }
+
+  if (internals.indicesCache._timeStamp !== undefined && internals.indicesCache._timeStamp > Date.now() - 10000) {
+    return cb(null, internals.indicesCache);
+  }
+
+  return exports.indices((err, indices) => {
+    if (err) {
+      // Even if an error, if we have a cache use it
+      if (internals.indicesCache._timeStamp !== undefined) {
+        return cb(null, internals.indicesCache);
+      }
+      return cb(err, null);
+    }
+
+    internals.indicesCache = indices;
+    internals.indicesCache._timeStamp = Date.now();
+    cb(null, indices);
+  });
+};
+
+exports.indicesSettingsCache = function (cb) {
+  if (!cb) {
+    return internals.indicesSettingsCache;
+  }
+
+  if (internals.indicesSettingsCache._timeStamp !== undefined && internals.indicesSettingsCache._timeStamp > Date.now() - 10000) {
+    return cb(null, internals.indicesSettingsCache);
+  }
+
+  return exports.indicesSettings((err, indicesSettings) => {
+    if (err) {
+      // Even if an error, if we have a cache use it
+      if (internals.indicesSettingsCache._timeStamp !== undefined) {
+        return cb(null, internals.indicesSettingsCache);
+      }
+      return cb(err, null);
+    }
+
+    internals.indicesSettingsCache = indicesSettings;
+    internals.indicesSettingsCache._timeStamp = Date.now();
+    cb(null, indicesSettings);
   });
 };
 
 exports.hostnameToNodeids = function (hostname, cb) {
   var query = {query: {match: {hostname:hostname}}};
-  exports.search('stats', 'stat', query, function(err, sdata) {
+  exports.search('stats', 'stat', query, (err, sdata) => {
     var nodes = [];
     if (sdata && sdata.hits && sdata.hits.hits) {
       for (var i = 0, ilen = sdata.hits.hits.length; i < ilen; i++) {
@@ -419,58 +894,16 @@ exports.hostnameToNodeids = function (hostname, cb) {
   });
 };
 
-function tagWorker(task, callback) {
-  if (task.type === "tagIdToName") {
-    if (internals.tagId2Name[task.id]) {
-      return setImmediate(callback, null, internals.tagId2Name[task.id]);
-    }
-    var query = {query: {term: {n:task.id}}};
-    exports.search('tags', 'tag', query, function(err, tdata) {
-      if (!err && tdata.hits.hits[0]) {
-        internals.tagId2Name[task.id] = tdata.hits.hits[0]._id;
-        internals.tagName2Id[tdata.hits.hits[0]._id] = task.id;
-        return callback(null, internals.tagId2Name[task.id]);
-      }
-      console.log("LOOKUPERROR", query, err, tdata.hits);
-      return callback(null, "<lookuperror>");
-    });
-  } else {
-    if (internals.tagName2Id[task.name]) {
-      return setImmediate(callback, null, internals.tagName2Id[task.name]);
-    }
-
-    exports.get('tags', 'tag', task.name, function(err, tdata) {
-      if (!err && tdata.found) {
-        internals.tagName2Id[task.name] = tdata._source.n;
-        internals.tagId2Name[tdata._source.n] = task.name;
-        return callback(null, internals.tagName2Id[task.name]);
-      }
-      return callback(null, -1);
-    });
-  }
-}
-
-internals.tagQueue = async.queue(tagWorker, 5);
-
-exports.tagIdToName = function (id, cb) {
-  internals.tagQueue.push({id: id, type: "tagIdToName"}, function (err, data) {
-    return cb(data);
-  });
-};
-
-exports.tagNameToId = function (name, cb) {
-  internals.tagQueue.push({name: name, type: "tagNameToId"}, function (err, data) {
-    return cb(data);
-  });
-};
-
 exports.fileIdToFile = function (node, num, cb) {
-  var key = node + "!" + num;
-  if (internals.fileId2File[key] !== undefined) {
-    return cb(internals.fileId2File[key]);
+  var key = node + '!' + num;
+  let info = internals.fileId2File[key];
+  if (info !== undefined) {
+    return setImmediate(() => {
+      cb(info);
+    });
   }
 
-  exports.get('files', 'file', node + '-' + num, function (err, fresult) {
+  exports.get('files', 'file', node + '-' + num, (err, fresult) => {
     if (!err && fresult.found) {
       var file = fresult._source;
       internals.fileId2File[key] = file;
@@ -497,15 +930,15 @@ exports.fileNameToFiles = function (name, cb) {
     if (internals.fileName2File[name]) {
       return cb([internals.fileName2File[name]]);
     }
-    query = {query: {term: {name: name}}, sort: [{num: {order: "desc"}}]};
+    query = {size: 100, query: {term: {name: name}}, sort: [{num: {order: "desc"}}]};
   }
 
-  exports.search('files', 'file', query, function(err, data) {
+  exports.search('files', 'file', query, (err, data) => {
     var files = [];
     if (err || !data.hits) {
       return cb(null);
     }
-    data.hits.hits.forEach(function(hit) {
+    data.hits.hits.forEach((hit) => {
       var file = hit._source;
       var key = file.node + "!" + file.num;
       internals.fileId2File[key] = file;
@@ -517,43 +950,25 @@ exports.fileNameToFiles = function (name, cb) {
 };
 
 exports.getSequenceNumber = function (name, cb) {
-  exports.index("sequence", "sequence", name, {}, function (err, sinfo) {
+  exports.index("sequence", "sequence", name, {}, (err, sinfo) => {
     cb(err, sinfo._version);
   });
 };
 
-exports.createTag = function (name, cb) {
-  // Only allow 1 create at a time, the lazy way
-  if (exports.createTag.inProgress === 1) {
-    setTimeout(exports.createTag, 50, name, cb);
-    return;
-  }
-
-  // Was already created while waiting
-  if (internals.tagName2Id[name]) {
-    return cb(internals.tagName2Id[name]);
-  }
-
-  // Do a create
-  exports.createTag.inProgress = 1;
-  exports.getSequenceNumber("tags", function (err, num) {
-    exports.index("tags", "tag", name, {n: num}, function (err, tinfo) {
-      exports.createTag.inProgress = 0;
-      internals.tagId2Name[num] = name;
-      internals.tagName2Id[name] = num;
-      cb(num);
-    });
-  });
-};
-
 exports.numberOfDocuments = function (index, cb) {
-  internals.elasticSearchClient.count({index: fixIndex(index), ignoreUnavailable:true}, function(err, result) {
-    if (err || result.error) {
-      return cb(null, 0);
-    }
+  if (cb === undefined) {
+    // Promise version
+    return internals.elasticSearchClient.count({index: fixIndex(index), ignoreUnavailable:true});
+  } else {
+    // cb version - remove in future
+    internals.elasticSearchClient.count({index: fixIndex(index), ignoreUnavailable:true}, (err, result) => {
+      if (err || result.error) {
+        return cb(null, 0);
+      }
 
-    return cb(null, result.count);
-  });
+      return cb(null, result.count);
+    });
+  }
 };
 
 exports.updateFileSize = function (item, filesize) {
@@ -563,16 +978,14 @@ exports.updateFileSize = function (item, filesize) {
 exports.checkVersion = function(minVersion, checkUsers) {
   var match = process.versions.node.match(/^(\d+)\.(\d+)\.(\d+)/);
   var version = parseInt(match[1], 10)*10000 + parseInt(match[2], 10) * 100 + parseInt(match[3], 10);
-  if (version < 40600) {
-    console.log("ERROR - Need at least node 4.6.0, currently using", process.version);
+  if (version < 81200) {
+    console.log(`ERROR - Need at least node 8.12.0, currently using ${process.version}`);
     process.exit(1);
     throw new Error("Exiting");
   }
 
-  var index;
-
-  ["stats", "dstats", "tags", "sequence", "files"].forEach(function(index) {
-    exports.indexStats(index, function(err, status) {
+  ["stats", "dstats", "sequence", "files"].forEach((index) => {
+    exports.indexStats(index, (err, status) => {
       if (err || status.error) {
         console.log("ERROR - Issue with index '" + index + "' make sure 'db/db.pl <eshost:esport> init' has been run", err, status);
         process.exit(1);
@@ -581,28 +994,29 @@ exports.checkVersion = function(minVersion, checkUsers) {
     });
   });
 
-  exports.get("dstats", "version", "version", function(err, doc) {
-    var version;
+  internals.elasticSearchClient.indices.getTemplate({name: fixIndex("sessions2_template"), filter_path: "**._meta", include_type_name: true}, (err, doc) => {
     if (err) {
       console.log("ERROR - Couldn't retrieve database version, is ES running?  Have you run ./db.pl host:port init?", err);
       process.exit(0);
-      throw new Error("Exiting");
     }
-    if (!doc.found) {
-      version = 0;
-    } else {
-      version = doc._source.version;
-    }
+    try {
+      var version = doc[fixIndex("sessions2_template")].mappings.session._meta.molochDbVersion;
 
-    if (version < minVersion) {
-        console.log("ERROR - Current database version (" + version + ") is less then required version (" + minVersion + ") use 'db/db.pl <eshost:esport> upgrade' to upgrade");
+      if (version < minVersion) {
+        console.log(`ERROR - Current database version (${version}) is less then required version (${minVersion}) use 'db/db.pl <eshost:esport> upgrade' to upgrade`);
+        if (doc._node) {
+          console.log(`On node ${doc._node}`);
+        }
         process.exit(1);
-        throw new Error("Exiting");
+      }
+    } catch (e) {
+      console.log("ERROR - Couldn't find database version.  Have you run ./db.pl host:port upgrade?", e);
+      process.exit(0);
     }
   });
 
   if (checkUsers) {
-    exports.numberOfUsers(function(err, num) {
+    exports.numberOfUsers((err, num) => {
       if (num === 0) {
         console.log("WARNING - No users are defined, use node viewer/addUser.js to add one, or turn off auth by unsetting passwordSecret");
       }
@@ -612,54 +1026,82 @@ exports.checkVersion = function(minVersion, checkUsers) {
 
 exports.isLocalView = function(node, yesCB, noCB) {
   if (node === internals.nodeName) {
+    if (internals.debug > 1) {
+      console.log(`DEBUG: node:${node} is local view because equals ${internals.nodeName}`);
+    }
     return yesCB();
   }
 
-  exports.molochNodeStatsCache(node, function(err, stat) {
+  exports.molochNodeStatsCache(node, (err, stat) => {
     if (err || stat.hostname !== os.hostname()) {
+      if (internals.debug > 1) {
+        console.log(`DEBUG: node:${node} is NOT local view because ${stat.hostname} != ${os.hostname()}`);
+      }
       noCB();
     } else {
+      if (internals.debug > 1) {
+        console.log(`DEBUG: node:${node} is local view because ${stat.hostname} == ${os.hostname()}`);
+      }
       yesCB();
     }
   });
 };
 
 exports.deleteFile = function(node, id, path, cb) {
-  fs.unlink(path, function() {
-    exports.deleteDocument('files', 'file', id, function(err, data) {
+  fs.unlink(path, () => {
+    exports.deleteDocument('files', 'file', id, (err, data) => {
       cb(null);
     });
   });
 };
 
-exports.id2Index = function (id) {
-  return 'sessions-' + id.substr(0,id.indexOf('-'));
+exports.session2Sid = function (item) {
+  if (item._id.length < 31) {
+    return item._index.substring(internals.prefix.length + 10) + ':' + item._id;
+  }
+
+  return item._id;
+};
+
+exports.sid2Id = function (id) {
+  let colon = id.indexOf(':');
+  if (colon > 0) {
+    return id.substr(colon+1);
+  }
+
+  return id;
+};
+
+exports.sid2Index = function (id) {
+  let colon = id.indexOf(':');
+  if (colon > 0) {
+    return 'sessions2-' + id.substr(0, colon);
+  }
+  return 'sessions2-' + id.substr(0, id.indexOf('-'));
 };
 
 exports.loadFields = function(cb) {
-  exports.search("fields", "field", {size:1000}, function (err, data) {
-    if (err) {
-      return cb([]);
-    }
-    cb(data.hits.hits);
-  });
+  return exports.search("fields", "field", {size:1000}, cb);
 };
-
-function twoDigitString(value) {
-  return (value < 10) ? ("0" + value) : value.toString();
-}
 
 exports.getIndices = function(startTime, stopTime, rotateIndex, cb) {
   var indices = [];
-  exports.getAliasesCache("sessions-*", function(err, aliases) {
+  exports.getAliasesCache("sessions2-*", (err, aliases) => {
 
     if (err || aliases.error) {
       return cb("");
     }
 
     var offset = 86400;
+    var hourlyN;
     if (rotateIndex === "hourly") {
       offset = 3600;
+      hourlyN = 1;
+    } else if (rotateIndex.startsWith("hourly")) {
+      var match = rotateIndex.match(/^hourly(\d+)$/);
+      hourlyN = +match[1];
+      offset = 3600 * hourlyN;
+      rotateIndex = "hourly";
     }
 
     startTime = Math.floor(startTime/offset)*offset;
@@ -669,25 +1111,25 @@ exports.getIndices = function(startTime, stopTime, rotateIndex, cb) {
       var d = new Date(startTime*1000);
       switch (rotateIndex) {
       case "monthly":
-        iname = internals.prefix + "sessions-" +
+        iname = internals.prefix + "sessions2-" +
           twoDigitString(d.getUTCFullYear()%100) + 'm' +
           twoDigitString(d.getUTCMonth()+1);
         break;
       case "weekly":
         var jan = new Date(d.getUTCFullYear(), 0, 0);
-        iname = internals.prefix + "sessions-" +
+        iname = internals.prefix + "sessions2-" +
           twoDigitString(d.getUTCFullYear()%100) + 'w' +
           twoDigitString(Math.floor((d - jan) / 604800000));
         break;
       case "hourly":
-        iname = internals.prefix + "sessions-" +
+        iname = internals.prefix + "sessions2-" +
           twoDigitString(d.getUTCFullYear()%100) +
           twoDigitString(d.getUTCMonth()+1) +
           twoDigitString(d.getUTCDate()) + 'h' +
-          twoDigitString(d.getUTCHours());
+          twoDigitString((d.getUTCHours()/hourlyN)*hourlyN);
         break;
       default:
-        iname = internals.prefix + "sessions-" +
+        iname = internals.prefix + "sessions2-" +
           twoDigitString(d.getUTCFullYear()%100) +
           twoDigitString(d.getUTCMonth()+1) +
           twoDigitString(d.getUTCDate());
@@ -699,12 +1141,26 @@ exports.getIndices = function(startTime, stopTime, rotateIndex, cb) {
       if (aliases[iname] && (indices.length === 0 || iname !== indices[indices.length-1])) {
         indices.push(iname);
       }
+
+      // Check for shrink version
+      iname += '-shrink';
+      if (aliases[iname] && (indices.length === 0 || iname !== indices[indices.length-1])) {
+        indices.push(iname);
+      }
     }
 
     if (indices.length === 0) {
-      return cb("sessions-*");
+      return cb("sessions2-*");
     }
 
     return cb(indices.join());
+  });
+};
+
+exports.getMinValue = function(index, field, cb) {
+  var params = {index: fixIndex(index), body: {size: 0, aggs: {min: {min: {field: field}}}}};
+  return internals.elasticSearchClient.search(params, (err, data) => {
+    if (err) { return cb(err, 0); }
+    return cb(null, data.aggregations.min.value);
   });
 };

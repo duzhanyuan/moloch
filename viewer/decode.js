@@ -1,5 +1,7 @@
 /* decode.js  -- The pcap decoding code.
  *
+ * To fix bugs you can just do `node decode.js [OPTIONS] [FILE]`
+ *
  * Copyright 2012-2016 AOL Inc. All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
@@ -27,9 +29,11 @@ var through    = require('through2');
 var peek       = require('peek-stream');
 var sprintf    = require('./public/sprintf.js');
 var async      = require('async');
+var crypto     = require('crypto');
 
 var internals  = {registry: {},
-                  settings: {}};
+                  settings: {},
+                  debug: 0};
 
 ////////////////////////////////////////////////////////////////////////////////
 function mkname (stream, name) {
@@ -51,6 +55,10 @@ function ItemTransform(options) {
 }
 util.inherits(ItemTransform, Transform);
 ItemTransform.prototype._transform = function (item, encoding, callback) {
+  if (!item) {
+    return callback();
+  }
+
   var self = this;
   switch (self._itemTransform.state) {
   case 0:
@@ -146,7 +154,7 @@ function createUncompressStream (options, context) {
 ////////////////////////////////////////////////////////////////////////////////
 function createUnbase64Stream (options, context) {
   return through(function(data, encoding, callback) {
-    callback(null, new Buffer(data.toString("binary"), "base64"));
+    callback(null, Buffer.from(data.toString("binary"), "base64"));
   });
 }
 
@@ -167,7 +175,7 @@ function createKeyUnxorStream (options, context) {
 
       }
       if (options["BODY-UNXOR"].key !== undefined) {
-        this.key = new Buffer(options["BODY-UNXOR"].key, "hex");
+        this.key = Buffer.from(options["BODY-UNXOR"].key, "hex");
       } else if (+options["BODY-UNXOR"].keyLength) {
         this.key = data.slice(0, +options["BODY-UNXOR"].keyLength);
         data = data.slice(+options["BODY-UNXOR"].keyLength);
@@ -198,13 +206,13 @@ function createUnxorBruteGzip (options, context) {
         return callback(null, data);
       }
 
-      var gzip = new Buffer("1f8b08000000000002", "hex");
-      var tmp = new Buffer(gzip.length*2);
+      var gzip = Buffer.from("1f8b08000000000002", "hex");
+      var tmp = Buffer.alloc(gzip.length*2);
       this.state = 2;
 
       done:
       for (var klen = 1; klen <= 4; klen++) {
-        var key = new Buffer(klen);
+        var key = Buffer.alloc(klen);
         for (var d = 0; d < data.length - gzip.length; d++) {
           for (var k = 0; k < klen; k++) {
             key[k] = data[d+k] ^ gzip[k];
@@ -303,6 +311,10 @@ ItemSMTPStream.prototype._process = function(item, callback) {
   var bodyName = "unknown";
   var boundary;
 
+  if (internals.debug > 0) {
+    console.log("ItemSMTPStream._process", item);
+  }
+
   function addBuffer(newState, mimeData) {
 
     if (mimeData) {
@@ -313,11 +325,11 @@ ItemSMTPStream.prototype._process = function(item, callback) {
       self.runningStreams++;
       var heb = new CollectBodyStream(self, item, headerInfo);
       pipes[pipes.length-1].pipe(heb);
-      bufferStream.end(new Buffer(self.buffers.join("\n")+"\n"));
+      bufferStream.end(Buffer.from(self.buffers.join("\n")+"\n"));
     } else {
       var buf = {client: item.client,
                      ts: item.ts,
-                   data: new Buffer(self.buffers.join("\n")+"\n"),
+                   data: Buffer.from(self.buffers.join("\n")+"\n"),
                 itemPos: ++self.itemPos};
 
       self.push(buf);
@@ -730,6 +742,15 @@ exports.register("ITEM-BYTES", through.ctor({objectMode: true}, function(item, e
   item.bytes = item.data.length;
   callback(null, item);
 }));
+exports.register("ITEM-HASH", through.ctor({objectMode: true}, function(item, encoding, callback) {
+  if (item.data !== undefined) {
+    var md5 = crypto.createHash('md5').update(item.data).digest('hex');
+    var sha256 = crypto.createHash('sha256').update(item.data).digest('hex');
+    if (this.options["ITEM-HASH"].hash === md5 || this.options["ITEM-HASH"].hash === sha256)
+      return callback(null, item);
+  }
+  return callback();
+}));
 exports.register("ITEM-RAWBODY", through.ctor({objectMode: true}, function(item, encoding, callback) {
   if ((item.bodyNum !== undefined) && (item.bodyNum === this.options["ITEM-RAWBODY"].bodyNumber)) {
     return callback(null, item);
@@ -819,6 +840,8 @@ if(require.main === module) {
       base = "ITEM-NATURAL";
     } else if (process.argv[aa] === "--utf8") {
       base = "ITEM-UTF8";
+    } else if (process.argv[aa] === "--debug") {
+      internals.debug++;
     } else if (process.argv[aa] === "--line") {
       options["ITEM-HEX"] = {showOffsets: true};
     } else if (process.argv[aa] === "--uncompress") {
@@ -874,7 +897,7 @@ if(require.main === module) {
           });
         },
         function (err, n) {
-          Pcap.reassemble_tcp(packets, packets[0].ip.addr1 + ':' + packets[0].tcp.sport, function(err, results) {
+          Pcap.reassemble_tcp(packets, packets.length, packets[0].ip.addr1 + ':' + packets[0].tcp.sport, function(err, results) {
             exports.createPipeline(options, options.order, new Pcap2ItemStream(options, results));
           });
         }
@@ -885,6 +908,4 @@ if(require.main === module) {
     var data   = require("./" + filename);
     exports.createPipeline(options, options.order, new Pcap2ItemStream(options, data));
   }
-
-
 }
